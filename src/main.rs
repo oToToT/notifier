@@ -24,10 +24,10 @@ struct Args {
     #[arg(short, long, default_value = "config.json")]
     config: String,
 
-    #[arg(short, long, default_value = "127.0.0.1")]
+    #[arg(long, default_value = "127.0.0.1")]
     host: String,
 
-    #[arg(short, long, default_value_t = 8787)]
+    #[arg(short, long, default_value_t = 80)]
     port: u16,
 }
 
