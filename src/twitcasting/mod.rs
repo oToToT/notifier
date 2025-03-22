@@ -2,7 +2,11 @@ use actix_web::web;
 use serde::Deserialize;
 
 #[derive(Deserialize, Clone)]
-pub struct TwitcastingConfig {}
+pub struct TwitcastingConfig {
+    client_id: String,
+    client_secret: String,
+    webhook_secret: String,
+}
 
 mod webhook;
 
