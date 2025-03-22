@@ -44,6 +44,7 @@ async fn main() -> std::io::Result<()> {
         let config = config.clone();
         App::new().wrap(Logger::default()).configure(|app| {
             if let Some(twitch_config) = config.twitch {
+                println!("Twitch loaded");
                 app.service(
                     web::scope("/twitch")
                         .app_data(
@@ -57,6 +58,7 @@ async fn main() -> std::io::Result<()> {
                 );
             }
             if let Some(twitcasting_config) = config.twitcasting {
+                println!("Twitcasting loaded");
                 app.service(
                     web::scope("/twitcasting")
                         .app_data(
