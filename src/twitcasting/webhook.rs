@@ -30,7 +30,7 @@ pub async fn webhook(
     config: web::Data<TwitcastingConfig>,
     req: web::Json<TwitcastingRequestBody>,
 ) -> impl Responder {
-    if config.webhook_secret != req.signature {
+    if config.webhook_signature != req.signature {
         HttpResponse::BadRequest().finish()
     } else if req.movie.is_live {
         assert!(req.movie.user_id == req.broadcaster.id);

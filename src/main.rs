@@ -6,7 +6,7 @@ use figment::{
     Figment,
     providers::{Format, Json},
 };
-use log_once::info_once;
+use log_once::{debug_once, info_once};
 use serde::Deserialize;
 
 mod twitcasting;
@@ -48,27 +48,28 @@ async fn main() -> std::io::Result<()> {
                 info_once!("Twitch loaded");
                 app.service(
                     web::scope("/twitch")
-                        .app_data(
+                        .app_data(web::Data::new(
                             config
                                 .base_url
                                 .join("./twitch/")
                                 .expect("Failed to setup twitch URL"),
-                        )
-                        .app_data(twitch_config)
+                        ))
+                        .app_data(web::Data::new(twitch_config))
                         .service(twitch::get_services()),
                 );
             }
             if let Some(twitcasting_config) = config.twitcasting {
                 info_once!("Twitcasting loaded");
+                debug_once!("{:?}", twitcasting_config);
                 app.service(
                     web::scope("/twitcasting")
-                        .app_data(
+                        .app_data(web::Data::new(
                             config
                                 .base_url
                                 .join("./twitcasting/")
                                 .expect("Failed to setup twitcasting URL"),
-                        )
-                        .app_data(twitcasting_config)
+                        ))
+                        .app_data(web::Data::new(twitcasting_config))
                         .service(twitcasting::get_services()),
                 );
             }
