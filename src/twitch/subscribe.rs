@@ -67,73 +67,60 @@ async fn get_twitch_token(
     Ok(res.access_token)
 }
 
-async fn subscribe_to_broadcaster_online(
-    config: &TwitchConfig,
-    webhook_url: &url::Url,
-    broadcaster_id: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let token = get_twitch_token(&config.client_id, &config.client_secret).await?;
-
-    let client = reqwest::Client::new();
-
-    let url = "https://api.twitch.tv/helix/eventsub/subscriptions";
-
-    let payload = SubscriptionPayload {
-        subscription_type: "stream.online".to_string(),
-        version: "1".to_string(),
-        condition: Condition {
-            broadcaster_user_id: broadcaster_id.to_string(),
-        },
-        transport: Transport {
-            method: "webhook".to_string(),
-            callback: webhook_url.to_string(),
-            secret: Some(config.twitch_webhook_secret.clone()),
-        },
-    };
-
-    let mut headers = HeaderMap::new();
-    headers.insert("Client-ID", HeaderValue::from_str(&config.client_id)?);
-    headers.insert(
-        "Authorization",
-        HeaderValue::from_str(&format!("Bearer {}", token))?,
-    );
-    headers.insert("Content-Type", HeaderValue::from_static("application/json"));
-
-    let response = client
-        .post(url)
-        .headers(headers)
-        .json(&payload)
-        .send()
-        .await?;
-
-    if response.status().is_success() {
-        let response_body: SubscriptionResponse = response.json().await?;
-        println!(
-            "Subscription successful: {:?}",
-            serde_json::to_string(&response_body).unwrap()
-        );
-    } else {
-        let error_body = response.text().await?;
-        eprintln!("Subscription failed: {:?}", error_body);
-    }
-
-    Ok(())
-}
-
 pub async fn subscribe(
     info: web::Query<SubscribeRequest>,
     config: web::Data<TwitchConfig>,
     service_url: web::Data<url::Url>,
 ) -> impl Responder {
-    subscribe_to_broadcaster_online(
-        &config,
-        &service_url
-            .join("./webhook")
-            .expect("Failed to setup webhook url"),
-        &info.id,
-    )
-    .await
-    .unwrap();
+    let webhook_url = service_url
+        .join("./webhook")
+        .expect("Failed to setup webhook url");
+
+    let token = get_twitch_token(&config.client_id, &config.client_secret)
+        .await
+        .expect("Failed to get token");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "Client-ID",
+        HeaderValue::from_str(&config.client_id).expect("Invalid client ID"),
+    );
+    headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {}", token)).expect("Invalid token"),
+    );
+    headers.insert("Content-Type", HeaderValue::from_static("application/json"));
+
+    let response = reqwest::Client::new()
+        .post("https://api.twitch.tv/helix/eventsub/subscriptions")
+        .headers(headers)
+        .json(&SubscriptionPayload {
+            subscription_type: "stream.online".to_string(),
+            version: "1".to_string(),
+            condition: Condition {
+                broadcaster_user_id: info.id.clone(),
+            },
+            transport: Transport {
+                method: "webhook".to_string(),
+                callback: webhook_url.to_string(),
+                secret: Some(config.twitch_webhook_secret.clone()),
+            },
+        })
+        .send()
+        .await
+        .expect("Failed to send subscription request");
+
+    if response.status().is_success() {
+        let response_body: SubscriptionResponse =
+            response.json().await.expect("Failed to parse response");
+        println!(
+            "Subscription successful: {:?}",
+            serde_json::to_string(&response_body).expect("Failed to serialize response")
+        );
+    } else {
+        let error_body = response.text().await.expect("Failed to get response body");
+        eprintln!("Subscription failed: {:?}", error_body);
+    }
 
     HttpResponse::Ok().finish()
 }
