@@ -18,13 +18,17 @@ struct Config {
     twitcasting: Option<twitcasting::TwitcastingConfig>,
 }
 
-/// Simple program to greet a person
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Name of the person to greet
     #[arg(short, long, default_value = "config.json")]
     config: String,
+
+    #[arg(short, long, default_value = "127.0.0.1")]
+    host: String,
+
+    #[arg(short, long, default_value_t = 8787)]
+    port: u16,
 }
 
 #[tokio::main]
@@ -67,7 +71,7 @@ async fn main() -> std::io::Result<()> {
             }
         })
     })
-    .bind(("127.0.0.1", 8787))?
+    .bind((args.host, args.port))?
     .run()
     .await
 }
