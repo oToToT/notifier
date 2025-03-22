@@ -1,5 +1,6 @@
 use actix_web::middleware::Logger;
 use actix_web::{App, HttpServer, web};
+use clap::Parser;
 use env_logger::Env;
 use figment::{
     Figment,
@@ -17,10 +18,20 @@ struct Config {
     twitcasting: Option<twitcasting::TwitcastingConfig>,
 }
 
+/// Simple program to greet a person
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Name of the person to greet
+    #[arg(short, long, default_value = "config.json")]
+    config: String,
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    let args = Args::parse();
     let config: Config = Figment::new()
-        .join(Json::file("config.json"))
+        .join(Json::file(args.config))
         .extract()
         .expect("Failed to load config");
 
@@ -34,7 +45,7 @@ async fn main() -> std::io::Result<()> {
                         .app_data(
                             config
                                 .base_url
-                                .join("./twitch")
+                                .join("./twitch/")
                                 .expect("Failed to setup twitch URL"),
                         )
                         .app_data(twitch_config)
@@ -47,7 +58,7 @@ async fn main() -> std::io::Result<()> {
                         .app_data(
                             config
                                 .base_url
-                                .join("./twitcasting")
+                                .join("./twitcasting/")
                                 .expect("Failed to setup twitcasting URL"),
                         )
                         .app_data(twitcasting_config)
