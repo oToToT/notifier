@@ -1,4 +1,4 @@
-use actix_web::{Responder, web};
+use actix_web::{HttpResponse, Responder, web};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
@@ -134,5 +134,6 @@ pub async fn subscribe(
     )
     .await
     .unwrap();
-    "Ok!".to_string()
+
+    HttpResponse::Ok().finish()
 }
