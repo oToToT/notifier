@@ -89,7 +89,6 @@ pub async fn subscribe(
         "Authorization",
         HeaderValue::from_str(&format!("Bearer {}", token)).expect("Invalid token"),
     );
-    headers.insert("Content-Type", HeaderValue::from_static("application/json"));
 
     let response = reqwest::Client::new()
         .post("https://api.twitch.tv/helix/eventsub/subscriptions")
