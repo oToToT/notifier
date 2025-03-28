@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Control Panel</title>
+  </head>
+  <body>
+    <label>
+      Type:
+      <select id="type">
+        <option value="twitch">Twitch</option>
+        <option value="twitcasting">Twitcasting</option>
+      </select>
+    </label>
+    <br>
+    <label>
+      Username:
+      <input type="text" id="username">
+    </label>
+    <br>
+    <button id="add">Add</button>
+    <hr>
+    <h2>List</h2>
+    <div id="tracked">
+      <span id="loading">Loading...</span>
+      <ul id="tracked-list">
+      </ul>
+    </div>
+    <script>
+      window.addEventListener('load', function(){
+        document.getElementById('add').addEventListener('click', function() {
+          const type = document.getElementById('type').value;
+          const username = document.getElementById('username').value;
+          window.location.href = `/${type}/subscribe?username=${username}`;
+        });
+
+        fetch('/list')
+          .then(response => response.json())
+          .then(data => {
+            document.getElementById('loading').remove();
+            const trackedList = document.getElementById('tracked-list');
+            data.forEach(item => {
+              const removeLink = document.createElement('a');
+              removeLink.href = `/${item.type}/unsubscribe?username=${item.username}`;
+              removeLink.textContent = 'Remove';
+
+              const li = document.createElement('li');
+              li.textContent = `${item.type}: ${item.username} (`;
+              li.appendChild(removeLink);
+              li.appendChild(document.createTextNode(')'));
+              trackedList.appendChild(li);
+            });
+          })
+          .catch(error => {
+            console.error('Error fetching tracked list:', error);
+          });
+      });
+    </script>
+  </body>
+</html>

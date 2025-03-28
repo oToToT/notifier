@@ -9,6 +9,7 @@ use figment::{
 use log_once::info_once;
 use serde::Deserialize;
 
+mod frontend;
 mod twitcasting;
 mod twitch;
 
@@ -33,20 +34,25 @@ struct Args {
 }
 
 macro_rules! add_service {
-    ($app:ident, $config:ident, $config_name:ident, $service:literal) => {
-        if let Some(c) = $config.$config_name {
+    ($app:ident, $service:literal, $config:ident, $config_name:ident) => {
+        if let Some(config) = $config.$config_name {
             info_once!("Adding service: {}", $service);
             $app.service(
                 web::scope($service)
-                    .app_data(web::Data::new(
-                        $config
-                            .base_url
-                            .join($service)
-                            .expect("Failed to setup twitch URL"),
-                    ))
-                    .app_data(web::Data::new(c))
-                    .service(twitch::get_services()),
+                    .app_data(web::Data::new($config.base_url.join($service).expect(
+                        format!("Failed to setup service url: {}", $service).as_str(),
+                    )))
+                    .app_data(web::Data::new(config))
+                    .service($config_name::get_services()),
             );
+        }
+    };
+    ($app:ident, $service:literal, $module:ident) => {
+        info_once!("Adding service: {}", $service);
+        if $service == "/" {
+            $app.service($module::get_services());
+        } else {
+            $app.service(web::scope($service).service($module::get_services()));
         }
     };
 }
@@ -63,11 +69,13 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         let config = config.clone();
         App::new().wrap(Logger::default()).configure(|app| {
-            add_service!(app, config, twitch, "./twitch/");
-            add_service!(app, config, twitcasting, "./twitcasting/");
+            add_service!(app, "/twitch/", config, twitch);
+            add_service!(app, "/twitcasting/", config, twitcasting);
+            add_service!(app, "/", frontend);
         })
     })
     .bind((args.host, args.port))?
+    .workers(1)
     .run()
     .await
 }
