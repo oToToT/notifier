@@ -46,7 +46,6 @@ pub async fn subscribe(
 
     let response = reqwest::Client::new()
         .post("https://apiv2.twitcasting.tv/webhooks")
-        //.post("https://ototot.tk/logger.php")
         .headers(headers)
         .json(&SubscriptionPayload {
             user_id: info.id.clone(),
