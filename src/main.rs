@@ -6,7 +6,7 @@ use figment::{
     Figment,
     providers::{Format, Json},
 };
-use log_once::{debug_once, info_once};
+use log_once::info_once;
 use serde::Deserialize;
 
 mod twitcasting;
@@ -32,6 +32,25 @@ struct Args {
     port: u16,
 }
 
+macro_rules! add_service {
+    ($app:ident, $config:ident, $config_name:ident, $service:literal) => {
+        if let Some(c) = $config.$config_name {
+            info_once!("Adding service: {}", $service);
+            $app.service(
+                web::scope($service)
+                    .app_data(web::Data::new(
+                        $config
+                            .base_url
+                            .join($service)
+                            .expect("Failed to setup twitch URL"),
+                    ))
+                    .app_data(web::Data::new(c))
+                    .service(twitch::get_services()),
+            );
+        }
+    };
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
@@ -44,35 +63,8 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         let config = config.clone();
         App::new().wrap(Logger::default()).configure(|app| {
-            if let Some(twitch_config) = config.twitch {
-                info_once!("Twitch loaded");
-                app.service(
-                    web::scope("/twitch")
-                        .app_data(web::Data::new(
-                            config
-                                .base_url
-                                .join("./twitch/")
-                                .expect("Failed to setup twitch URL"),
-                        ))
-                        .app_data(web::Data::new(twitch_config))
-                        .service(twitch::get_services()),
-                );
-            }
-            if let Some(twitcasting_config) = config.twitcasting {
-                info_once!("Twitcasting loaded");
-                debug_once!("{:?}", twitcasting_config);
-                app.service(
-                    web::scope("/twitcasting")
-                        .app_data(web::Data::new(
-                            config
-                                .base_url
-                                .join("./twitcasting/")
-                                .expect("Failed to setup twitcasting URL"),
-                        ))
-                        .app_data(web::Data::new(twitcasting_config))
-                        .service(twitcasting::get_services()),
-                );
-            }
+            add_service!(app, config, twitch, "./twitch/");
+            add_service!(app, config, twitcasting, "./twitcasting/");
         })
     })
     .bind((args.host, args.port))?
