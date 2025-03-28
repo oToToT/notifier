@@ -7,15 +7,18 @@ use figment::{
     providers::{Format, Json},
 };
 use log_once::info_once;
+use r2d2_sqlite::SqliteConnectionManager;
 use serde::Deserialize;
 
-mod frontend;
+mod controller;
+mod db;
 mod twitcasting;
 mod twitch;
 
 #[derive(Deserialize, Clone)]
 struct Config {
     base_url: url::Url,
+    db_path: String,
     twitch: Option<twitch::TwitchConfig>,
     twitcasting: Option<twitcasting::TwitcastingConfig>,
 }
@@ -41,38 +44,48 @@ async fn main() -> std::io::Result<()> {
         .extract()
         .expect("Failed to load config");
 
+    let manager = SqliteConnectionManager::file(config.db_path.clone());
+    let pool = db::Pool::new(manager).expect("Failed to connect to database");
+
     env_logger::init_from_env(Env::default().default_filter_or("info"));
     HttpServer::new(move || {
         let config = config.clone();
-        App::new().wrap(Logger::default()).configure(|app| {
-            macro_rules! add_service {
-                ($service:literal, $config:ident, $config_name:ident) => {
-                    if let Some(config) = $config.$config_name {
+        App::new()
+            .wrap(Logger::default())
+            .app_data(web::Data::new(pool.clone()))
+            .configure(|app| {
+                macro_rules! add_service {
+                    ($service:literal, $config:ident, $config_name:ident) => {
+                        if let Some(config) = $config.$config_name {
+                            info_once!("Adding service: {}", $service);
+                            $config_name::init_db(&pool);
+                            app.service(
+                                web::scope($service)
+                                    .app_data(web::Data::new(
+                                        $config.base_url.join($service).expect(
+                                            format!("Failed to setup service url: {}", $service)
+                                                .as_str(),
+                                        ),
+                                    ))
+                                    .app_data(web::Data::new(config))
+                                    .service($config_name::get_services()),
+                            );
+                        }
+                    };
+                    ($service:literal, $module:ident) => {
                         info_once!("Adding service: {}", $service);
-                        app.service(
-                            web::scope($service)
-                                .app_data(web::Data::new($config.base_url.join($service).expect(
-                                    format!("Failed to setup service url: {}", $service).as_str(),
-                                )))
-                                .app_data(web::Data::new(config))
-                                .service($config_name::get_services()),
-                        );
-                    }
-                };
-                ($service:literal, $module:ident) => {
-                    info_once!("Adding service: {}", $service);
-                    if $service == "/" {
-                        app.service($module::get_services());
-                    } else {
-                        app.service(web::scope($service).service($module::get_services()));
-                    }
-                };
-            }
+                        if $service == "/" {
+                            app.service($module::get_services());
+                        } else {
+                            app.service(web::scope($service).service($module::get_services()));
+                        }
+                    };
+                }
 
-            add_service!("/twitch/", config, twitch);
-            add_service!("/twitcasting/", config, twitcasting);
-            add_service!("/", frontend);
-        })
+                add_service!("/twitch/", config, twitch);
+                add_service!("/twitcasting/", config, twitcasting);
+                add_service!("/", controller);
+            })
     })
     .bind((args.host, args.port))?
     .workers(1)

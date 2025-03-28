@@ -19,3 +19,6 @@ url = { version = "2", features = ["serde"] }
 clap = { version = "4.5.32", features = ["derive"] }
 base64 = "0.22.1"
 log-once = "0.4.1"
+r2d2_sqlite = "0.27.0"
+r2d2 = "0.8.10"
+rusqlite = "0.34.0"

@@ -6,6 +6,13 @@ pub async fn index() -> impl Responder {
         .body(include_str!("./index.html"))
 }
 
+pub async fn list() -> impl Responder {
+    "{\"list\": \"list\"}"
+}
+
 pub fn get_services() -> Vec<impl actix_web::dev::HttpServiceFactory> {
-    vec![web::resource("/").route(web::get().to(index))]
+    vec![
+        web::resource("/").route(web::get().to(index)),
+        web::resource("/list").route(web::get().to(list)),
+    ]
 }
