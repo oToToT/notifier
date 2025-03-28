@@ -33,30 +33,6 @@ struct Args {
     port: u16,
 }
 
-macro_rules! add_service {
-    ($app:ident, $service:literal, $config:ident, $config_name:ident) => {
-        if let Some(config) = $config.$config_name {
-            info_once!("Adding service: {}", $service);
-            $app.service(
-                web::scope($service)
-                    .app_data(web::Data::new($config.base_url.join($service).expect(
-                        format!("Failed to setup service url: {}", $service).as_str(),
-                    )))
-                    .app_data(web::Data::new(config))
-                    .service($config_name::get_services()),
-            );
-        }
-    };
-    ($app:ident, $service:literal, $module:ident) => {
-        info_once!("Adding service: {}", $service);
-        if $service == "/" {
-            $app.service($module::get_services());
-        } else {
-            $app.service(web::scope($service).service($module::get_services()));
-        }
-    };
-}
-
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
@@ -69,9 +45,33 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         let config = config.clone();
         App::new().wrap(Logger::default()).configure(|app| {
-            add_service!(app, "/twitch/", config, twitch);
-            add_service!(app, "/twitcasting/", config, twitcasting);
-            add_service!(app, "/", frontend);
+            macro_rules! add_service {
+                ($service:literal, $config:ident, $config_name:ident) => {
+                    if let Some(config) = $config.$config_name {
+                        info_once!("Adding service: {}", $service);
+                        app.service(
+                            web::scope($service)
+                                .app_data(web::Data::new($config.base_url.join($service).expect(
+                                    format!("Failed to setup service url: {}", $service).as_str(),
+                                )))
+                                .app_data(web::Data::new(config))
+                                .service($config_name::get_services()),
+                        );
+                    }
+                };
+                ($service:literal, $module:ident) => {
+                    info_once!("Adding service: {}", $service);
+                    if $service == "/" {
+                        app.service($module::get_services());
+                    } else {
+                        app.service(web::scope($service).service($module::get_services()));
+                    }
+                };
+            }
+
+            add_service!("/twitch/", config, twitch);
+            add_service!("/twitcasting/", config, twitcasting);
+            add_service!("/", frontend);
         })
     })
     .bind((args.host, args.port))?
