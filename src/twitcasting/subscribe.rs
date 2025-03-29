@@ -7,6 +7,16 @@ use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
+#[derive(Deserialize)]
+struct User {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct UsersResponse {
+    user: User,
+}
+
 #[derive(Serialize)]
 struct SubscriptionPayload {
     user_id: String,
@@ -54,15 +64,11 @@ async fn get_user_id_from_username(
         .map_err(|_| "Failed to connect to twitcasting API")?;
 
     if response.status().is_success() {
-        let user_info: serde_json::Value = response
+        let user_info: UsersResponse = response
             .json()
             .await
             .map_err(|_| "Failed to parse response")?;
-        if let Some(user_id) = user_info["id"].as_str() {
-            Ok(user_id.to_string())
-        } else {
-            Err("Failed to extract user id".to_string())
-        }
+        Ok(user_info.user.id)
     } else {
         Err("Failed to get user ID".to_string())
     }
