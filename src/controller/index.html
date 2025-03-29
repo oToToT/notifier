@@ -45,8 +45,13 @@
             const trackedList = document.getElementById('tracked-list');
             data.forEach(username => {
               const removeLink = document.createElement('a');
-              removeLink.href = `/${type}/unsubscribe?username=${username}`;
+              removeLink.href = '#';
               removeLink.textContent = 'Remove';
+              removeLink.addEventListener('click', async function() {
+                await fetch(`/${type}/unsubscribe?username=${username}`;, {
+                  method: 'DELETE',
+                });
+              });
 
               const li = document.createElement('li');
               li.textContent = `${type}: ${username} (`;
