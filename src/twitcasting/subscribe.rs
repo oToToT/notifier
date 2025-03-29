@@ -89,7 +89,7 @@ pub async fn subscribe(
     config: web::Data<TwitcastingConfig>,
     pool: web::Data<db::Pool>,
 ) -> impl Responder {
-    let username_regex = Regex::new(r"^[A-Za-z0-9_]$").expect("Failed to create validation regex");
+    let username_regex = Regex::new(r"^[A-Za-z0-9_]+$").expect("Failed to create validation regex");
     if !username_regex.is_match(&info.username) {
         return HttpResponse::BadRequest().body("Invalid username format");
     }
