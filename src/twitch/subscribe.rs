@@ -1,3 +1,4 @@
+use crate::db;
 use actix_web::{HttpResponse, Responder, web};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -50,10 +51,10 @@ struct TokenResponse {
 
 #[derive(Deserialize)]
 pub struct SubscribeRequest {
-    id: String,
+    username: String,
 }
 
-async fn get_twitch_token(
+async fn get_token(
     client_id: &str,
     client_secret: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
@@ -67,37 +68,88 @@ async fn get_twitch_token(
     Ok(res.access_token)
 }
 
-pub async fn subscribe(
-    info: web::Query<SubscribeRequest>,
-    config: web::Data<TwitchConfig>,
-    service_url: web::Data<url::Url>,
-) -> impl Responder {
-    let webhook_url = service_url
-        .join("./webhook")
-        .expect("Failed to setup webhook url");
-
-    let token = get_twitch_token(&config.client_id, &config.client_secret)
-        .await
-        .expect("Failed to get token");
-
+fn get_auth_headers(client_id: &str, token: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
         "Client-ID",
-        HeaderValue::from_str(&config.client_id).expect("Invalid client ID"),
+        HeaderValue::from_str(client_id).expect("Invalid client ID"),
     );
     headers.insert(
         "Authorization",
         HeaderValue::from_str(&format!("Bearer {}", token)).expect("Invalid token"),
     );
+    headers
+}
+
+async fn get_user_id_from_username(
+    username: &str,
+    client_id: &str,
+    token: &str,
+) -> Result<String, String> {
+    let response = reqwest::Client::new()
+        .get(format!(
+            "https://api.twitch.tv/helix/users?login={}",
+            username
+        ))
+        .headers(get_auth_headers(client_id, token))
+        .send()
+        .await
+        .map_err(|_| "Failed to connect to twitcasting API")?;
+
+    if response.status().is_success() {
+        let user_info: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|_| "Failed to parse response")?;
+        if user_info["data"].is_array() && !user_info["data"].as_array().unwrap().is_empty() {
+            if let Some(user_id) = user_info["data"][0]["id"].as_str() {
+                return Ok(user_id.to_string());
+            }
+        }
+        Err("Failed to extract user id".to_string())
+    } else {
+        Err("Failed to get user ID".to_string())
+    }
+}
+
+pub fn record_hook(pool: &db::Pool, id: &str, username: &str) {
+    pool.get()
+        .expect("Failed to get connection from pool")
+        .execute(
+            "INSERT OR IGNORE INTO twitch (id, username) VALUES (?, ?)",
+            rusqlite::params![id, username],
+        )
+        .expect("Failed to insert or update user");
+}
+
+pub async fn subscribe(
+    info: web::Query<SubscribeRequest>,
+    config: web::Data<TwitchConfig>,
+    service_url: web::Data<url::Url>,
+    pool: web::Data<db::Pool>,
+) -> impl Responder {
+    let webhook_url = service_url
+        .join("./webhook")
+        .expect("Failed to setup webhook url");
+
+    let token = get_token(&config.client_id, &config.client_secret)
+        .await
+        .expect("Failed to get token");
 
     let response = reqwest::Client::new()
         .post("https://api.twitch.tv/helix/eventsub/subscriptions")
-        .headers(headers)
+        .headers(get_auth_headers(&config.client_id, &token))
         .json(&SubscriptionPayload {
             subscription_type: "stream.online".to_string(),
             version: "1".to_string(),
             condition: Condition {
-                broadcaster_user_id: info.id.clone(),
+                broadcaster_user_id: get_user_id_from_username(
+                    &info.username,
+                    &config.client_id,
+                    &token,
+                )
+                .await
+                .expect("Failed to get user ID"),
             },
             transport: Transport {
                 method: "webhook".to_string(),
@@ -112,10 +164,14 @@ pub async fn subscribe(
     if response.status().is_success() {
         let response_body: SubscriptionResponse =
             response.json().await.expect("Failed to parse response");
-        println!(
-            "Subscription successful: {:?}",
-            serde_json::to_string(&response_body).expect("Failed to serialize response")
-        );
+        if !response_body.data.is_empty() {
+            let subscription = &response_body.data[0];
+            record_hook(&pool, &subscription.id, &info.username);
+            println!(
+                "Subscription successful: {:?}",
+                serde_json::to_string(&response_body).expect("Failed to serialize response")
+            );
+        }
     } else {
         let error_body = response.text().await.expect("Failed to get response body");
         eprintln!("Subscription failed: {:?}", error_body);
