@@ -1,4 +1,5 @@
 use super::TwitcastingConfig;
+use crate::db;
 use actix_web::{HttpResponse, Responder, web};
 use base64::prelude::{BASE64_STANDARD, Engine};
 use log::debug;
@@ -67,9 +68,20 @@ async fn get_user_id_from_username(
     }
 }
 
+pub fn record_hook(pool: &db::Pool, user_id: &str, username: &str) {
+    pool.get()
+        .expect("Failed to get connection from pool")
+        .execute(
+            "INSERT OR IGNORE INTO twitcasting (user_id, username) VALUES (?, ?)",
+            rusqlite::params![user_id, username],
+        )
+        .expect("Failed to insert or update user");
+}
+
 pub async fn subscribe(
     info: web::Query<SubscribeRequest>,
     config: web::Data<TwitcastingConfig>,
+    pool: web::Data<db::Pool>,
 ) -> impl Responder {
     let username_regex = Regex::new(r"^[A-Za-z0-9_]$").expect("Failed to create validation regex");
     if !username_regex.is_match(&info.username) {
@@ -94,6 +106,7 @@ pub async fn subscribe(
     if response.status().is_success() {
         let response_body: SubscriptionResponse =
             response.json().await.expect("Failed to parse response");
+        record_hook(&pool, &user_id, &info.username);
         println!(
             "Subscription successful: {:?}",
             serde_json::to_string(&response_body).expect("Failed to serialize response")
