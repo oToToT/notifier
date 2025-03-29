@@ -62,7 +62,7 @@ async fn main() -> std::io::Result<()> {
                             app.service(
                                 web::scope($service)
                                     .app_data(web::Data::new(
-                                        $config.base_url.join($service).expect(
+                                        $config.base_url.join(concat!($service, "/")).expect(
                                             format!("Failed to setup service url: {}", $service)
                                                 .as_str(),
                                         ),
@@ -82,8 +82,8 @@ async fn main() -> std::io::Result<()> {
                     };
                 }
 
-                add_service!("/twitch/", config, twitch);
-                add_service!("/twitcasting/", config, twitcasting);
+                add_service!("/twitch", config, twitch);
+                add_service!("/twitcasting", config, twitcasting);
                 add_service!("/", controller);
             })
     })
