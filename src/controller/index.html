@@ -28,13 +28,13 @@
       </ul>
     </div>
     <script>
-      window.addEventListener('load', async function(){
-        document.getElementById('add').addEventListener('click', function() {
+      window.addEventListener('load', function(){
+        document.getElementById('add').addEventListener('click', async function() {
           const type = document.getElementById('type').value;
           const username = document.getElementById('username').value;
           await fetch(`/${type}/subscribe?username=${encodeURIComponent(username)}`, {
             method: 'PUT',
-          );
+          });
           location.reload();
         });
 
