@@ -1,3 +1,5 @@
+use super::unsubscribe::remove_from_db;
+use crate::db;
 use actix_web::http::header::HeaderMap;
 use actix_web::{HttpRequest, HttpResponse, Responder, web};
 use hmac::{Hmac, Mac};
@@ -17,6 +19,7 @@ struct TwitchRequestBody {
 struct Subscription {
     #[serde(rename = "type")]
     subscription_type: String,
+    id: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -31,22 +34,7 @@ fn get_hmac(secret: &str, data: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-fn webhook_callback_verification(body: &TwitchRequestBody) -> HttpResponse {
-    if let Some(challenge) = &body.challenge {
-        HttpResponse::Ok()
-            .content_type("text/plain")
-            .body(challenge.clone())
-    } else {
-        HttpResponse::BadRequest().finish()
-    }
-}
-
-fn webhook_notification(
-    config: &TwitchConfig,
-    headers: &HeaderMap,
-    body: &TwitchRequestBody,
-    raw_body: &str,
-) -> HttpResponse {
+fn verify_request(config: &TwitchConfig, headers: &HeaderMap, raw_body: &str) -> bool {
     let signature = headers.get("twitch-eventsub-message-signature");
     let message_id = headers.get("twitch-eventsub-message-id");
     let message_timestamp = headers.get("twitch-eventsub-message-timestamp");
@@ -62,13 +50,23 @@ fn webhook_notification(
             &config.twitch_webhook_secret,
             &format!("{}{}{}", message_id, message_timestamp, raw_body),
         );
-        if format!("sha256={}", hmac_hex) != signature {
-            return HttpResponse::Forbidden().finish();
-        }
+        format!("sha256={}", hmac_hex) == signature
     } else {
-        return HttpResponse::BadRequest().finish();
+        false
     }
+}
 
+fn webhook_callback_verification(body: &TwitchRequestBody) -> HttpResponse {
+    if let Some(challenge) = &body.challenge {
+        HttpResponse::Ok()
+            .content_type("text/plain")
+            .body(challenge.clone())
+    } else {
+        HttpResponse::BadRequest().finish()
+    }
+}
+
+fn webhook_notification(body: &TwitchRequestBody) -> HttpResponse {
     if let Some(subscription) = &body.subscription {
         if subscription.subscription_type == "stream.online" {
             if let Some(event) = &body.event {
@@ -80,19 +78,34 @@ fn webhook_notification(
     HttpResponse::Ok().finish()
 }
 
+fn webhook_revocation(body: &TwitchRequestBody, pool: &db::Pool) -> HttpResponse {
+    if let Some(subscription) = &body.subscription {
+        remove_from_db(pool, &subscription.id).expect("Failed to remove from db");
+        println!("Subscription {} revoked", subscription.id);
+    }
+    HttpResponse::Ok().finish()
+}
+
 pub async fn webhook(
     config: web::Data<TwitchConfig>,
     req: HttpRequest,
     raw_body: String,
+    pool: web::Data<db::Pool>,
 ) -> impl Responder {
-    let body: TwitchRequestBody = serde_json::from_str(&raw_body).unwrap();
     let headers = req.headers();
+    if !verify_request(&config, headers, &raw_body) {
+        return HttpResponse::Unauthorized().finish();
+    }
 
     if let Some(message) = headers.get("twitch-eventsub-message-type") {
+        let body: TwitchRequestBody = serde_json::from_str(&raw_body).unwrap();
+
         if message == "webhook_callback_verification" {
             webhook_callback_verification(&body)
         } else if message == "notification" {
-            webhook_notification(&config, headers, &body, &raw_body)
+            webhook_notification(&body)
+        } else if message == "revocation" {
+            webhook_revocation(&body, &pool)
         } else {
             HttpResponse::BadRequest().finish()
         }

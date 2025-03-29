@@ -11,6 +11,7 @@ pub struct TwitchConfig {
 }
 
 mod subscribe;
+mod unsubscribe;
 mod webhook;
 mod list;
 
