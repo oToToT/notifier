@@ -2,6 +2,7 @@ use super::TwitcastingConfig;
 use actix_web::{HttpResponse, Responder, web};
 use base64::prelude::{BASE64_STANDARD, Engine};
 use log::debug;
+use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
@@ -19,20 +20,15 @@ pub struct SubscriptionResponse {
 
 #[derive(Deserialize)]
 pub struct SubscribeRequest {
-    id: String,
+    username: String,
 }
 
-fn get_twitcasting_token(client_id: &str, client_secret: &str) -> String {
+fn get_token(client_id: &str, client_secret: &str) -> String {
     BASE64_STANDARD.encode(format!("{}:{}", client_id, client_secret).as_bytes())
 }
 
-pub async fn subscribe(
-    info: web::Query<SubscribeRequest>,
-    config: web::Data<TwitcastingConfig>,
-) -> impl Responder {
-    let token = get_twitcasting_token(&config.client_id, &config.client_secret);
-
-    debug!("token: {}", token);
+fn get_auth_headers(client_id: &str, client_secret: &str) -> HeaderMap {
+    let token = get_token(client_id, client_secret);
 
     let mut headers = HeaderMap::new();
     headers.insert("X-Api-Version", HeaderValue::from_static("2.0"));
@@ -42,13 +38,53 @@ pub async fn subscribe(
     );
     headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-    debug!("headers: {:?}", headers);
+    headers
+}
+
+async fn get_user_id_from_username(
+    username: &str,
+    config: &TwitcastingConfig,
+) -> Result<String, String> {
+    let response = reqwest::Client::new()
+        .get(format!("https://apiv2.twitcasting.tv/users/{}", username))
+        .headers(get_auth_headers(&config.client_id, &config.client_secret))
+        .send()
+        .await
+        .map_err(|_| "Failed to connect to twitcasting API")?;
+
+    if response.status().is_success() {
+        let user_info: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|_| "Failed to parse response")?;
+        if let Some(user_id) = user_info["id"].as_str() {
+            Ok(user_id.to_string())
+        } else {
+            Err("Failed to extract user id".to_string())
+        }
+    } else {
+        Err("Failed to get user ID".to_string())
+    }
+}
+
+pub async fn subscribe(
+    info: web::Query<SubscribeRequest>,
+    config: web::Data<TwitcastingConfig>,
+) -> impl Responder {
+    let username_regex = Regex::new(r"^[A-Za-z0-9_]$").expect("Failed to create validation regex");
+    if !username_regex.is_match(&info.username) {
+        return HttpResponse::BadRequest().body("Invalid username format");
+    }
+
+    let user_id = get_user_id_from_username(&info.username, &config)
+        .await
+        .expect("Failed to get user ID");
 
     let response = reqwest::Client::new()
         .post("https://apiv2.twitcasting.tv/webhooks")
-        .headers(headers)
+        .headers(get_auth_headers(&config.client_id, &config.client_secret))
         .json(&SubscriptionPayload {
-            user_id: info.id.clone(),
+            user_id: user_id.clone(),
             events: vec!["livestart".to_string()],
         })
         .send()
