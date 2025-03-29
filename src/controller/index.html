@@ -28,7 +28,7 @@
       </ul>
     </div>
     <script>
-      window.addEventListener('load', function(){
+      window.addEventListener('load', async function(){
         document.getElementById('add').addEventListener('click', async function() {
           const type = document.getElementById('type').value;
           const username = document.getElementById('username').value;
@@ -39,7 +39,7 @@
         });
 
         for (let type of ['twitch', 'twitcasting']) {
-          fetch(`${type}/list`)
+          await fetch(`${type}/list`)
           .then(response => response.json())
           .then(data => {
             const trackedList = document.getElementById('tracked-list');
