@@ -1,10 +1,9 @@
 use crate::db;
 use actix_web::{HttpResponse, Responder, web};
 use regex::Regex;
-use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
-use super::TwitchConfig;
+use super::{TwitchConfig, get_auth_headers, get_token};
 
 #[derive(Serialize)]
 struct SubscriptionPayload {
@@ -46,11 +45,6 @@ struct SubscriptionData {
 }
 
 #[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-}
-
-#[derive(Deserialize)]
 pub struct SubscribeRequest {
     username: String,
 }
@@ -63,33 +57,6 @@ struct User {
 #[derive(Deserialize)]
 struct UsersResponse {
     data: Vec<User>,
-}
-
-async fn get_token(
-    client_id: &str,
-    client_secret: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let client = reqwest::Client::new();
-    let res = client.post(format!("https://id.twitch.tv/oauth2/token?client_id={}&client_secret={}&grant_type=client_credentials", client_id, client_secret))
-    .send()
-    .await?
-    .json::<TokenResponse>()
-    .await?;
-
-    Ok(res.access_token)
-}
-
-fn get_auth_headers(client_id: &str, token: &str) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "Client-ID",
-        HeaderValue::from_str(client_id).expect("Invalid client ID"),
-    );
-    headers.insert(
-        "Authorization",
-        HeaderValue::from_str(&format!("Bearer {}", token)).expect("Invalid token"),
-    );
-    headers
 }
 
 async fn get_user_id_from_username(
