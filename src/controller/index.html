@@ -28,11 +28,14 @@
       </ul>
     </div>
     <script>
-      window.addEventListener('load', function(){
+      window.addEventListener('load', async function(){
         document.getElementById('add').addEventListener('click', function() {
           const type = document.getElementById('type').value;
           const username = document.getElementById('username').value;
-          window.location.href = `/${type}/subscribe?username=${username}`;
+          await fetch(`/${type}/subscribe?username=${encodeURIComponent(username)}`, {
+            method: 'PUT',
+          );
+          location.reload();
         });
 
         for (let type of ['twitch', 'twitcasting']) {

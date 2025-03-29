@@ -26,7 +26,7 @@ pub fn init_db(pool: &db::Pool) {
 
 pub fn get_services() -> Vec<impl actix_web::dev::HttpServiceFactory> {
     vec![
-        web::resource("/subscribe").route(web::get().to(subscribe::subscribe)),
+        web::resource("/subscribe").route(web::put().to(subscribe::subscribe)),
         web::resource("/webhook").route(web::post().to(webhook::webhook)),
         web::resource("/list").route(web::get().to(list::list)),
     ]
