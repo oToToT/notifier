@@ -35,18 +35,18 @@
           window.location.href = `/${type}/subscribe?username=${username}`;
         });
 
-        fetch('/list')
+        for (let type of ['twitch', 'twitcasting']) {
+          fetch(`${type}/list`)
           .then(response => response.json())
           .then(data => {
-            document.getElementById('loading').remove();
             const trackedList = document.getElementById('tracked-list');
-            data.forEach(item => {
+            data.forEach(username => {
               const removeLink = document.createElement('a');
-              removeLink.href = `/${item.type}/unsubscribe?username=${item.username}`;
+              removeLink.href = `/${type}/unsubscribe?username=${username}`;
               removeLink.textContent = 'Remove';
 
               const li = document.createElement('li');
-              li.textContent = `${item.type}: ${item.username} (`;
+              li.textContent = `${type}: ${username} (`;
               li.appendChild(removeLink);
               li.appendChild(document.createTextNode(')'));
               trackedList.appendChild(li);
@@ -55,6 +55,8 @@
           .catch(error => {
             console.error('Error fetching tracked list:', error);
           });
+        }
+        document.getElementById('loading').remove();
       });
     </script>
   </body>
