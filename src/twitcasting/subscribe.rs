@@ -1,11 +1,10 @@
-use super::TwitcastingConfig;
 use crate::db;
 use actix_web::{HttpResponse, Responder, web};
-use base64::prelude::{BASE64_STANDARD, Engine};
 use log::debug;
 use regex::Regex;
-use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
+
+use super::{TwitcastingConfig, get_auth_headers};
 
 #[derive(Deserialize)]
 struct User {
@@ -32,24 +31,6 @@ pub struct SubscriptionResponse {
 #[derive(Deserialize)]
 pub struct SubscribeRequest {
     username: String,
-}
-
-fn get_token(client_id: &str, client_secret: &str) -> String {
-    BASE64_STANDARD.encode(format!("{}:{}", client_id, client_secret).as_bytes())
-}
-
-fn get_auth_headers(client_id: &str, client_secret: &str) -> HeaderMap {
-    let token = get_token(client_id, client_secret);
-
-    let mut headers = HeaderMap::new();
-    headers.insert("X-Api-Version", HeaderValue::from_static("2.0"));
-    headers.insert(
-        "Authorization",
-        HeaderValue::from_str(&format!("Basic {}", token)).expect("Invalid token"),
-    );
-    headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-    headers
 }
 
 async fn get_user_id_from_username(
