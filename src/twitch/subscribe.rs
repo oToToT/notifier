@@ -1,5 +1,6 @@
 use crate::db;
 use actix_web::{HttpResponse, Responder, web};
+use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
@@ -113,7 +114,7 @@ async fn get_user_id_from_username(
             .map_err(|_| "Failed to parse response")?;
         if !user_info.data.is_empty() {
             Ok(user_info.data[0].id.clone())
-        } else{
+        } else {
             Err("Failed to extract user id".to_string())
         }
     } else {
@@ -137,6 +138,11 @@ pub async fn subscribe(
     service_url: web::Data<url::Url>,
     pool: web::Data<db::Pool>,
 ) -> impl Responder {
+    let username_regex = Regex::new(r"^[A-Za-z0-9_]+$").expect("Failed to create validation regex");
+    if !username_regex.is_match(&info.username) {
+        return HttpResponse::BadRequest().body("Invalid username format");
+    }
+
     let webhook_url = service_url
         .join("./webhook")
         .expect("Failed to setup webhook url");
