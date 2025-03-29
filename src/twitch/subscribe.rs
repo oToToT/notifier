@@ -54,6 +54,16 @@ pub struct SubscribeRequest {
     username: String,
 }
 
+#[derive(Deserialize)]
+struct User {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct UsersResponse {
+    data: Vec<User>,
+}
+
 async fn get_token(
     client_id: &str,
     client_secret: &str,
@@ -97,16 +107,15 @@ async fn get_user_id_from_username(
         .map_err(|_| "Failed to connect to twitcasting API")?;
 
     if response.status().is_success() {
-        let user_info: serde_json::Value = response
+        let user_info: UsersResponse = response
             .json()
             .await
             .map_err(|_| "Failed to parse response")?;
-        if user_info["data"].is_array() && !user_info["data"].as_array().unwrap().is_empty() {
-            if let Some(user_id) = user_info["data"][0]["id"].as_str() {
-                return Ok(user_id.to_string());
-            }
+        if !user_info.data.is_empty() {
+            Ok(user_info.data[0].id.clone())
+        } else{
+            Err("Failed to extract user id".to_string())
         }
-        Err("Failed to extract user id".to_string())
     } else {
         Err("Failed to get user ID".to_string())
     }
