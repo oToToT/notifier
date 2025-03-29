@@ -48,9 +48,10 @@
               removeLink.href = '#';
               removeLink.textContent = 'Remove';
               removeLink.addEventListener('click', async function() {
-                await fetch(`/${type}/unsubscribe?username=${username}`;, {
+                await fetch(`/${type}/unsubscribe?username=${username}`, {
                   method: 'DELETE',
                 });
+                location.reload();
               });
 
               const li = document.createElement('li');
