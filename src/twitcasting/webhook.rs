@@ -1,4 +1,5 @@
 use super::TwitcastingConfig;
+use crate::discord;
 use actix_web::{HttpResponse, Responder, web};
 use serde::Deserialize;
 
@@ -29,6 +30,7 @@ pub struct TwitcastingRequestBody {
 pub async fn webhook(
     config: web::Data<TwitcastingConfig>,
     req: web::Json<TwitcastingRequestBody>,
+    discord_bot: web::Data<discord::Bot>,
 ) -> impl Responder {
     if config.webhook_signature != req.signature {
         HttpResponse::BadRequest().finish()
@@ -46,6 +48,14 @@ pub async fn webhook(
             println!("last owner comment: {}", last_owner_comment);
         }
         println!("link: {}", req.movie.link);
+        discord_bot
+            .notify_livestream(
+                &req.broadcaster.screen_id,
+                &req.movie.title,
+                &req.movie.link,
+            )
+            .await
+            .expect("Failed to notify Discord");
         HttpResponse::Ok().finish()
     } else {
         HttpResponse::Ok().finish()
