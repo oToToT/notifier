@@ -22,7 +22,10 @@ impl Bot {
         url: &str,
     ) -> serenity::Result<Message> {
         self.channel_id
-            .say(&self.http, format!("「{}」配信中! - {}\nLink: {}", name, title, url))
+            .say(
+                &self.http,
+                format!("「{}」配信中！ - {}\n{}", name, title, url),
+            )
             .await
     }
 }
