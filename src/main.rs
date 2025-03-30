@@ -95,7 +95,6 @@ async fn main() -> std::io::Result<()> {
             })
     })
     .bind((args.host, args.port))?
-    .workers(1)
     .run()
     .await
 }
