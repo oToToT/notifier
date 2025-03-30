@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 mod controller;
 mod db;
+mod discord;
 mod twitcasting;
 mod twitch;
 
@@ -19,6 +20,8 @@ mod twitch;
 struct Config {
     base_url: url::Url,
     db_path: String,
+    discord_token: String,
+    discord_channel_id: u64,
     twitch: Option<twitch::TwitchConfig>,
     twitcasting: Option<twitcasting::TwitcastingConfig>,
 }
@@ -52,6 +55,10 @@ async fn main() -> std::io::Result<()> {
         let config = config.clone();
         App::new()
             .wrap(Logger::default())
+            .app_data(web::Data::new(discord::Bot::new(
+                &config.discord_token,
+                config.discord_channel_id,
+            )))
             .app_data(web::Data::new(pool.clone()))
             .configure(|app| {
                 macro_rules! add_service {
