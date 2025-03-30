@@ -50,7 +50,7 @@ pub async fn webhook(
         println!("link: {}", req.movie.link);
         discord_bot
             .notify_livestream(
-                &req.broadcaster.screen_id,
+                &req.broadcaster.name,
                 &req.movie.title,
                 &req.movie.link,
             )
