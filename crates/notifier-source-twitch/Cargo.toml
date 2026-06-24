@@ -1,0 +1,26 @@
+[package]
+name = "notifier-source-twitch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+futures.workspace = true
+hex.workspace = true
+http.workspace = true
+notifier-runtime = { path = "../notifier-runtime" }
+reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["json", "rustls"] }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+twitch_api.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+hmac.workspace = true
+tokio.workspace = true
+tower.workspace = true

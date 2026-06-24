@@ -1,0 +1,35 @@
+{
+  "server": {
+    "bind": "127.0.0.1:8080",
+    "public_base_url": "https://notify.example.com"
+  },
+  "storage": {
+    "sqlite_path": "notifier.db"
+  },
+  "delivery": {
+    "workers": 4,
+    "max_attempts": 8
+  },
+  "routes": [
+    {
+      "id": "twitch-example-to-discord",
+      "src": {
+        "plugin": "twitch",
+        "spec": {
+          "client_id": "replace-me",
+          "client_secret": "replace-me",
+          "webhook_secret": "replace-with-10-to-100-characters",
+          "broadcaster": "example"
+        }
+      },
+      "dst": {
+        "plugin": "discord",
+        "spec": {
+          "bot_token": "replace-me",
+          "channel_id": "1234567890",
+          "message": "{{ broadcaster.name }} is live: {{ stream.title }}\n{{ stream.url }}"
+        }
+      }
+    }
+  ]
+}

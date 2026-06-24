@@ -1,0 +1,21 @@
+[package]
+name = "notifier-source-twitcasting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+notifier-runtime = { path = "../notifier-runtime" }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+twitcasting.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tower.workspace = true
