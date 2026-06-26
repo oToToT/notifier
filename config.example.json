@@ -18,7 +18,7 @@
         "client_id": "replace-me",
         "client_secret": "replace-me",
         "webhook_secret": "replace-with-10-to-100-characters",
-        "broadcaster": "example"
+        "broadcasters": ["example", "another_example"]
       }
     }
   },

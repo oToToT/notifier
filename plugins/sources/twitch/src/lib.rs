@@ -15,6 +15,7 @@ use notifier_runtime::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use twitch_api::{
     TwitchClient,
     eventsub::{Event, EventType, Transport, stream::StreamOnlineV1},
@@ -48,7 +49,7 @@ struct Spec {
     client_id: String,
     client_secret: String,
     webhook_secret: String,
-    broadcaster: String,
+    broadcasters: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -111,7 +112,6 @@ fn parse_spec(value: &Value) -> Result<Spec> {
         ("client_id", &spec.client_id),
         ("client_secret", &spec.client_secret),
         ("webhook_secret", &spec.webhook_secret),
-        ("broadcaster", &spec.broadcaster),
     ] {
         if value.trim().is_empty() {
             bail!("{name} cannot be empty");
@@ -120,14 +120,45 @@ fn parse_spec(value: &Value) -> Result<Spec> {
     if spec.webhook_secret.len() < 10 || spec.webhook_secret.len() > 100 {
         bail!("webhook_secret must contain 10 to 100 characters");
     }
-    if !spec
-        .broadcaster
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || character == '_')
-    {
-        bail!("broadcaster contains invalid characters");
+    let broadcasters = broadcasters(&spec)?;
+    if broadcasters.is_empty() {
+        bail!("at least one broadcaster must be configured");
     }
+    reject_duplicate_broadcasters(&broadcasters)?;
+    validate_broadcasters(&broadcasters)?;
     Ok(spec)
+}
+
+fn broadcasters(spec: &Spec) -> Result<Vec<String>> {
+    let values = spec.broadcasters.clone();
+    for value in &values {
+        if value.trim().is_empty() {
+            bail!("broadcasters cannot contain empty values");
+        }
+    }
+    Ok(values)
+}
+
+fn reject_duplicate_broadcasters(values: &[String]) -> Result<()> {
+    let mut seen = HashSet::new();
+    for value in values {
+        if !seen.insert(value.to_ascii_lowercase()) {
+            bail!("duplicate broadcaster {value:?}");
+        }
+    }
+    Ok(())
+}
+
+fn validate_broadcasters(values: &[String]) -> Result<()> {
+    for value in values {
+        if !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            bail!("broadcaster {value:?} contains invalid characters");
+        }
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -173,32 +204,35 @@ impl SourcePlugin for TwitchSource {
             .join(&spec.webhook_path)?
             .to_string();
         let token = token(&self.client, &spec).await?;
-        let broadcaster = resolve_user(&self.client, &spec, &token).await?;
+        let broadcasters = broadcasters(&spec)?;
         let pages = self
             .client
             .helix
             .get_eventsub_subscriptions(None, Some(EventType::StreamOnline), None, &token)
             .try_collect::<Vec<_>>()
             .await?;
-        let exists = pages
-            .iter()
-            .flat_map(|page| &page.subscriptions)
-            .any(|subscription| {
-                subscription.condition["broadcaster_user_id"] == broadcaster.id.as_str()
-                    && subscription
-                        .transport
-                        .as_webhook()
-                        .is_some_and(|transport| transport.callback == callback)
-            });
-        if !exists {
-            self.client
-                .helix
-                .create_eventsub_subscription(
-                    StreamOnlineV1::broadcaster_user_id(broadcaster.id),
-                    Transport::webhook(&callback, spec.webhook_secret),
-                    &token,
-                )
-                .await?;
+        for broadcaster_login in broadcasters {
+            let broadcaster = resolve_user(&self.client, &broadcaster_login, &token).await?;
+            let exists = pages
+                .iter()
+                .flat_map(|page| &page.subscriptions)
+                .any(|subscription| {
+                    subscription.condition["broadcaster_user_id"] == broadcaster.id.as_str()
+                        && subscription
+                            .transport
+                            .as_webhook()
+                            .is_some_and(|transport| transport.callback == callback)
+                });
+            if !exists {
+                self.client
+                    .helix
+                    .create_eventsub_subscription(
+                        StreamOnlineV1::broadcaster_user_id(broadcaster.id),
+                        Transport::webhook(&callback, spec.webhook_secret.clone()),
+                        &token,
+                    )
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -238,9 +272,10 @@ async fn handle_webhook(
                 return Ok(StatusCode::NO_CONTENT.into_response());
             }
             let event = parsed.event.context("event is missing")?;
-            if !spec
-                .broadcaster
-                .eq_ignore_ascii_case(&event.broadcaster_user_login)
+            let broadcasters = broadcasters(&spec)?;
+            if !broadcasters
+                .iter()
+                .any(|configured| configured.eq_ignore_ascii_case(&event.broadcaster_user_login))
             {
                 return Ok(StatusCode::NO_CONTENT.into_response());
             }
@@ -322,14 +357,14 @@ async fn token(
 
 async fn resolve_user(
     client: &TwitchClient<'static, reqwest13::Client>,
-    spec: &Spec,
+    broadcaster: &str,
     token: &AppAccessToken,
 ) -> Result<twitch_api::helix::users::User> {
     client
         .helix
-        .get_user_from_login(spec.broadcaster.as_str(), token)
+        .get_user_from_login(broadcaster, token)
         .await?
-        .with_context(|| format!("Twitch broadcaster {:?} was not found", spec.broadcaster))
+        .with_context(|| format!("Twitch broadcaster {broadcaster:?} was not found"))
 }
 
 async fn get_stream(
@@ -376,7 +411,7 @@ mod tests {
             client_id: "id".into(),
             client_secret: "secret".into(),
             webhook_secret: "0123456789".into(),
-            broadcaster: "Example".into(),
+            broadcasters: vec!["Example".into(), "Another".into()],
         };
         let validated = TwitchSource::new()
             .validate_spec(&serde_json::to_value(spec).unwrap())

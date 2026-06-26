@@ -15,6 +15,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use twitcasting::{
     AppAuth, Client, ScreenId, UserRef, WebhookEvent, WebhookEvents, WebhookListRequest,
     WebhookPayload, decode_webhook,
@@ -43,7 +44,7 @@ struct Spec {
     client_id: String,
     client_secret: String,
     webhook_signature: String,
-    broadcaster: String,
+    broadcasters: Vec<String>,
     #[serde(default = "default_api_base_url")]
     api_base_url: String,
 }
@@ -92,13 +93,37 @@ fn parse_spec(value: &Value) -> Result<Spec> {
         ("client_id", &spec.client_id),
         ("client_secret", &spec.client_secret),
         ("webhook_signature", &spec.webhook_signature),
-        ("broadcaster", &spec.broadcaster),
     ] {
         if value.trim().is_empty() {
             bail!("{name} cannot be empty");
         }
     }
+    let broadcasters = broadcasters(&spec)?;
+    if broadcasters.is_empty() {
+        bail!("at least one broadcaster must be configured");
+    }
+    reject_duplicate_broadcasters(&broadcasters)?;
     Ok(spec)
+}
+
+fn broadcasters(spec: &Spec) -> Result<Vec<String>> {
+    let values = spec.broadcasters.clone();
+    for value in &values {
+        if value.trim().is_empty() {
+            bail!("broadcasters cannot contain empty values");
+        }
+    }
+    Ok(values)
+}
+
+fn reject_duplicate_broadcasters(values: &[String]) -> Result<()> {
+    let mut seen = HashSet::new();
+    for value in values {
+        if !seen.insert(value.to_ascii_lowercase()) {
+            bail!("duplicate broadcaster {value:?}");
+        }
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -136,14 +161,16 @@ impl SourcePlugin for TwitCastingSource {
 
     async fn reconcile(&self, context: &SourceContext) -> Result<()> {
         let spec = parse_spec(&context.spec)?;
-        let user_id = resolve_user(&spec).await?;
         let hooks = list_webhooks(&spec).await?;
-        let exists = hooks
-            .webhooks
-            .iter()
-            .any(|hook| hook.user_id == user_id && hook.event == WebhookEvent::LiveStart);
-        if !exists {
-            create_webhook(&spec, &user_id).await?;
+        for broadcaster in broadcasters(&spec)? {
+            let user_id = resolve_user(&spec, &broadcaster).await?;
+            let exists = hooks
+                .webhooks
+                .iter()
+                .any(|hook| hook.user_id == user_id && hook.event == WebhookEvent::LiveStart);
+            if !exists {
+                create_webhook(&spec, &user_id).await?;
+            }
         }
         Ok(())
     }
@@ -169,10 +196,11 @@ fn handle_webhook(state: &WebhookState, body: WebhookPayload) -> Result<()> {
         return Ok(());
     };
     let spec = parse_spec(&state.context.spec)?;
+    let broadcasters = broadcasters(&spec)?;
     if spec.webhook_signature != signature.expose_secret()
-        || !spec
-            .broadcaster
-            .eq_ignore_ascii_case(broadcaster.screen_id.as_str())
+        || !broadcasters
+            .iter()
+            .any(|configured| configured.eq_ignore_ascii_case(broadcaster.screen_id.as_str()))
     {
         bail!("signature or broadcaster did not match");
     }
@@ -219,12 +247,12 @@ fn client(spec: &Spec) -> Result<Client<AppAuth>> {
         .build()?)
 }
 
-async fn resolve_user(spec: &Spec) -> Result<twitcasting::UserId> {
+async fn resolve_user(spec: &Spec, broadcaster: &str) -> Result<twitcasting::UserId> {
     let response = client(spec)?
         .users()
-        .get(&UserRef::from(ScreenId::new(&spec.broadcaster)))
+        .get(&UserRef::from(ScreenId::new(broadcaster)))
         .await
-        .context("failed to resolve TwitCasting broadcaster")?;
+        .with_context(|| format!("failed to resolve TwitCasting broadcaster {broadcaster:?}"))?;
     Ok(response.value.user.id)
 }
 
@@ -257,7 +285,7 @@ mod tests {
             client_id: "client".into(),
             client_secret: "secret".into(),
             webhook_signature: "signature".into(),
-            broadcaster: "example".into(),
+            broadcasters: vec!["example".into(), "another".into()],
             api_base_url: default_api_base_url(),
         };
         let validated = TwitCastingSource::new()
