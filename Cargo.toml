@@ -1,11 +1,11 @@
 [workspace]
 members = [
     "crates/notifier-runtime",
-    "crates/notifier-source-twitch",
-    "crates/notifier-source-twitcasting",
-    "crates/notifier-destination-discord",
-    "crates/notifier-destination-telegram",
-    "crates/notifier-server",
+    "plugins/sources/twitch",
+    "plugins/sources/twitcasting",
+    "plugins/destinations/discord",
+    "plugins/destinations/telegram",
+    "apps/notifier-server",
 ]
 resolver = "3"
 

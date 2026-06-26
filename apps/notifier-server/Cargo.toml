@@ -1,0 +1,17 @@
+[package]
+name = "notifier-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+notifier-destination-discord = { path = "../../plugins/destinations/discord" }
+notifier-destination-telegram = { path = "../../plugins/destinations/telegram" }
+notifier-runtime = { path = "../../crates/notifier-runtime" }
+notifier-source-twitch = { path = "../../plugins/sources/twitch" }
+notifier-source-twitcasting = { path = "../../plugins/sources/twitcasting" }
+serde_json.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true

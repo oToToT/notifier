@@ -22,13 +22,13 @@ of this design.
 
 The workspace contains:
 
-- `notifier-runtime`: plugin traits, configuration, templates, HTTP integration, SQLite
+- `crates/notifier-runtime`: plugin traits, configuration, templates, HTTP integration, SQLite
   persistence, workers, retries, health checks, and schema generation.
-- `notifier-source-twitch`: Twitch EventSub handling using `twitch_api`.
-- `notifier-source-twitcasting`: TwitCasting API and webhook handling using `twitcasting`.
-- `notifier-destination-discord`: Discord delivery using `serenity`.
-- `notifier-destination-telegram`: Telegram delivery using `teloxide`.
-- `notifier-server`: executable that registers the four plugins and exposes the CLI.
+- `plugins/sources/twitch`: Twitch EventSub handling using `twitch_api`.
+- `plugins/sources/twitcasting`: TwitCasting API and webhook handling using `twitcasting`.
+- `plugins/destinations/discord`: Discord delivery using `serenity`.
+- `plugins/destinations/telegram`: Telegram delivery using `teloxide`.
+- `apps/notifier-server`: executable that registers the four plugins and exposes the CLI.
 
 Plugins are ordinary Rust libraries. Dynamic loading and a stable binary ABI are explicitly
 out of scope.

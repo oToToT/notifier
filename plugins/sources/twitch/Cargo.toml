@@ -11,7 +11,7 @@ axum.workspace = true
 futures.workspace = true
 hex.workspace = true
 http.workspace = true
-notifier-runtime = { path = "../notifier-runtime" }
+notifier-runtime = { path = "../../../crates/notifier-runtime" }
 reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["json", "rustls"] }
 schemars.workspace = true
 serde.workspace = true

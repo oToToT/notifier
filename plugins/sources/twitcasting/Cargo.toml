@@ -8,7 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
-notifier-runtime = { path = "../notifier-runtime" }
+notifier-runtime = { path = "../../../crates/notifier-runtime" }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
