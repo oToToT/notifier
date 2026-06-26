@@ -10,7 +10,7 @@ use axum::{
 };
 use futures::TryStreamExt;
 use notifier_runtime::{
-    PluginMetadata, SourceContext, SourcePlugin, ValidatedSource, schema_value,
+    PluginMetadata, RoutePluginInput, SourceContext, SourcePlugin, ValidatedSource, schema_value,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,11 @@ struct Spec {
     client_id: String,
     client_secret: String,
     webhook_secret: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Input {
     broadcasters: Vec<String>,
 }
 
@@ -120,36 +125,31 @@ fn parse_spec(value: &Value) -> Result<Spec> {
     if spec.webhook_secret.len() < 10 || spec.webhook_secret.len() > 100 {
         bail!("webhook_secret must contain 10 to 100 characters");
     }
-    let broadcasters = broadcasters(&spec)?;
-    if broadcasters.is_empty() {
-        bail!("at least one broadcaster must be configured");
-    }
-    reject_duplicate_broadcasters(&broadcasters)?;
-    validate_broadcasters(&broadcasters)?;
     Ok(spec)
 }
 
-fn broadcasters(spec: &Spec) -> Result<Vec<String>> {
-    let values = spec.broadcasters.clone();
-    for value in &values {
+fn parse_input(value: &Value) -> Result<Input> {
+    let input: Input =
+        serde_json::from_value(value.clone()).context("invalid Twitch route input")?;
+    validate_broadcasters(&input.broadcasters)?;
+    Ok(input)
+}
+
+fn validate_broadcasters(values: &[String]) -> Result<()> {
+    if values.is_empty() {
+        bail!("at least one broadcaster must be configured");
+    }
+    for value in values {
         if value.trim().is_empty() {
             bail!("broadcasters cannot contain empty values");
         }
     }
-    Ok(values)
-}
-
-fn reject_duplicate_broadcasters(values: &[String]) -> Result<()> {
     let mut seen = HashSet::new();
     for value in values {
         if !seen.insert(value.to_ascii_lowercase()) {
             bail!("duplicate broadcaster {value:?}");
         }
     }
-    Ok(())
-}
-
-fn validate_broadcasters(values: &[String]) -> Result<()> {
     for value in values {
         if !value
             .chars()
@@ -161,6 +161,37 @@ fn validate_broadcasters(values: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn configured_broadcasters(inputs: &[RoutePluginInput]) -> Result<Vec<String>> {
+    let mut values = Vec::new();
+    let mut seen = HashSet::new();
+    for route in inputs {
+        let input = parse_input(&route.input)
+            .with_context(|| format!("invalid source input on route {:?}", route.route_id))?;
+        for broadcaster in input.broadcasters {
+            if seen.insert(broadcaster.to_ascii_lowercase()) {
+                values.push(broadcaster);
+            }
+        }
+    }
+    Ok(values)
+}
+
+fn matching_route_ids(inputs: &[RoutePluginInput], broadcaster: &str) -> Result<Vec<String>> {
+    let mut route_ids = Vec::new();
+    for route in inputs {
+        let input = parse_input(&route.input)
+            .with_context(|| format!("invalid source input on route {:?}", route.route_id))?;
+        if input
+            .broadcasters
+            .iter()
+            .any(|configured| configured.eq_ignore_ascii_case(broadcaster))
+        {
+            route_ids.push(route.route_id.clone());
+        }
+    }
+    Ok(route_ids)
+}
+
 #[async_trait]
 impl SourcePlugin for TwitchSource {
     fn metadata(&self) -> PluginMetadata {
@@ -168,6 +199,7 @@ impl SourcePlugin for TwitchSource {
             name: "twitch",
             description: "Receives Twitch EventSub stream.online webhooks.",
             spec_schema: schema_value::<Spec>(),
+            input_schema: schema_value::<Input>(),
         }
     }
 
@@ -179,8 +211,9 @@ impl SourcePlugin for TwitchSource {
         vec!["event".into(), "broadcaster".into(), "stream".into()]
     }
 
-    fn validate_spec(&self, spec: &Value) -> Result<ValidatedSource> {
+    fn validate_spec(&self, spec: &Value, inputs: &[RoutePluginInput]) -> Result<ValidatedSource> {
         let spec = parse_spec(spec)?;
+        configured_broadcasters(inputs)?;
         Ok(ValidatedSource {
             allowed_template_variables: self.template_variables(),
             http_paths: vec![spec.webhook_path],
@@ -204,7 +237,7 @@ impl SourcePlugin for TwitchSource {
             .join(&spec.webhook_path)?
             .to_string();
         let token = token(&self.client, &spec).await?;
-        let broadcasters = broadcasters(&spec)?;
+        let broadcasters = configured_broadcasters(&context.route_inputs)?;
         let pages = self
             .client
             .helix
@@ -272,11 +305,9 @@ async fn handle_webhook(
                 return Ok(StatusCode::NO_CONTENT.into_response());
             }
             let event = parsed.event.context("event is missing")?;
-            let broadcasters = broadcasters(&spec)?;
-            if !broadcasters
-                .iter()
-                .any(|configured| configured.eq_ignore_ascii_case(&event.broadcaster_user_login))
-            {
+            let route_ids =
+                matching_route_ids(&state.context.route_inputs, &event.broadcaster_user_login)?;
+            if route_ids.is_empty() {
                 return Ok(StatusCode::NO_CONTENT.into_response());
             }
             let access_token = token(&state.client, &spec).await?;
@@ -305,7 +336,7 @@ async fn handle_webhook(
             });
             state.context.sink.ingest(
                 &state.context.source_id,
-                &state.context.route_ids,
+                &route_ids,
                 message_id,
                 &context,
             )?;
@@ -411,11 +442,56 @@ mod tests {
             client_id: "id".into(),
             client_secret: "secret".into(),
             webhook_secret: "0123456789".into(),
-            broadcasters: vec!["Example".into(), "Another".into()],
         };
         let validated = TwitchSource::new()
-            .validate_spec(&serde_json::to_value(spec).unwrap())
+            .validate_spec(
+                &serde_json::to_value(spec).unwrap(),
+                &[RoutePluginInput {
+                    route_id: "route".into(),
+                    input: serde_json::json!({"broadcasters": ["Example", "Another"]}),
+                }],
+            )
             .unwrap();
         assert_eq!(validated.http_paths, ["/hooks/twitch"]);
+    }
+
+    #[test]
+    fn rejects_duplicate_route_broadcasters_case_insensitively() {
+        let spec = serde_json::json!({
+            "webhook_path": "/hooks/twitch",
+            "client_id": "id",
+            "client_secret": "secret",
+            "webhook_secret": "0123456789"
+        });
+        let error = TwitchSource::new()
+            .validate_spec(
+                &spec,
+                &[RoutePluginInput {
+                    route_id: "route".into(),
+                    input: serde_json::json!({"broadcasters": ["Example", "example"]}),
+                }],
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("duplicate broadcaster"));
+    }
+
+    #[test]
+    fn matches_only_routes_with_the_event_broadcaster() {
+        let route_ids = matching_route_ids(
+            &[
+                RoutePluginInput {
+                    route_id: "one".into(),
+                    input: serde_json::json!({"broadcasters": ["hanon", "kotoha"]}),
+                },
+                RoutePluginInput {
+                    route_id: "two".into(),
+                    input: serde_json::json!({"broadcasters": ["other"]}),
+                },
+            ],
+            "KOTOHA",
+        )
+        .unwrap();
+
+        assert_eq!(route_ids, ["one"]);
     }
 }

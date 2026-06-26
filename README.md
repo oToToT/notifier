@@ -20,9 +20,10 @@ Provider protocol bindings are supplied by `twitch_api`, `twitcasting`, `serenit
 `teloxide`; the plugin crates contain routing and policy logic rather than independent API
 clients.
 
-Sources and destinations are keyed reusable definitions. Routes reference those IDs and own
-their message templates. Multiple routes can reuse either side; each referenced source is
-reconciled once.
+Sources and destinations are keyed reusable plugin instances. Routes reference those IDs and
+provide plugin-defined route-local inputs, such as broadcaster lists or destination channel
+IDs, alongside their message templates. Multiple routes can reuse either side; each
+referenced source is reconciled once.
 
 ## Commands
 

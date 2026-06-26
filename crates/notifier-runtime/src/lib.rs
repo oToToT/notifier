@@ -21,7 +21,10 @@ use serde_json::{Value, json};
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 
-pub use config::{Config, DeliveryConfig, PluginConfig, RouteConfig, ServerConfig, StorageConfig};
+pub use config::{
+    Config, DeliveryConfig, PluginConfig, RouteConfig, RouteEndpointConfig, ServerConfig,
+    StorageConfig,
+};
 pub use storage::{Delivery, Storage};
 pub use template::{render_template, validate_template};
 
@@ -30,6 +33,7 @@ pub struct PluginMetadata {
     pub name: &'static str,
     pub description: &'static str,
     pub spec_schema: Value,
+    pub input_schema: Value,
 }
 
 #[derive(Clone, Debug)]
@@ -43,8 +47,14 @@ pub struct SourceContext {
     pub source_id: String,
     pub public_base_url: url::Url,
     pub spec: Value,
-    pub route_ids: Vec<String>,
+    pub route_inputs: Vec<RoutePluginInput>,
     pub sink: EventSink,
+}
+
+#[derive(Clone, Debug)]
+pub struct RoutePluginInput {
+    pub route_id: String,
+    pub input: Value,
 }
 
 #[derive(Clone, Debug)]
@@ -74,7 +84,7 @@ pub trait SourcePlugin: Send + Sync {
     fn metadata(&self) -> PluginMetadata;
     fn template_context_schema(&self) -> Value;
     fn template_variables(&self) -> Vec<String>;
-    fn validate_spec(&self, spec: &Value) -> Result<ValidatedSource>;
+    fn validate_spec(&self, spec: &Value, inputs: &[RoutePluginInput]) -> Result<ValidatedSource>;
     fn router(&self, context: SourceContext) -> Router;
     async fn reconcile(&self, context: &SourceContext) -> Result<()>;
 }
@@ -82,8 +92,13 @@ pub trait SourcePlugin: Send + Sync {
 #[async_trait]
 pub trait DestinationPlugin: Send + Sync {
     fn metadata(&self) -> PluginMetadata;
-    fn validate_spec(&self, spec: &Value) -> Result<()>;
-    async fn deliver(&self, spec: &Value, message: &str) -> Result<(), DeliveryError>;
+    fn validate_spec(&self, spec: &Value, inputs: &[RoutePluginInput]) -> Result<()>;
+    async fn deliver(
+        &self,
+        spec: &Value,
+        input: &Value,
+        message: &str,
+    ) -> Result<(), DeliveryError>;
 }
 
 #[derive(Clone)]
@@ -91,6 +106,7 @@ struct PreparedRoute {
     source_id: String,
     source_plugin: String,
     destination_id: String,
+    destination_input: Value,
     message_template: String,
 }
 
@@ -98,7 +114,7 @@ struct PreparedRoute {
 struct PreparedSource {
     plugin: String,
     spec: Value,
-    route_ids: Vec<String>,
+    route_inputs: Vec<RoutePluginInput>,
 }
 
 #[derive(Clone)]
@@ -181,71 +197,105 @@ impl RuntimeBuilder {
         config.validate_base()?;
         let mut prepared_sources = HashMap::new();
         for (id, definition) in &config.srcs {
-            let plugin = self
-                .sources
+            self.sources
                 .get(&definition.plugin)
                 .with_context(|| format!("unknown source plugin {:?}", definition.plugin))?;
-            let validated = plugin
-                .validate_spec(&definition.spec)
-                .with_context(|| format!("invalid source definition {id:?}"))?;
-            for path in &validated.http_paths {
-                validate_http_path(path)
-                    .with_context(|| format!("invalid webhook path on source {id:?}"))?;
-            }
             prepared_sources.insert(
                 id.clone(),
-                (
-                    PreparedSource {
-                        plugin: definition.plugin.clone(),
-                        spec: definition.spec.clone(),
-                        route_ids: Vec::new(),
-                    },
-                    validated,
-                ),
+                PreparedSource {
+                    plugin: definition.plugin.clone(),
+                    spec: definition.spec.clone(),
+                    route_inputs: Vec::new(),
+                },
             );
         }
         let mut prepared_destinations = HashMap::new();
         for (id, definition) in &config.dsts {
-            let plugin = self
-                .destinations
+            self.destinations
                 .get(&definition.plugin)
                 .with_context(|| format!("unknown destination plugin {:?}", definition.plugin))?;
-            plugin
-                .validate_spec(&definition.spec)
-                .with_context(|| format!("invalid destination definition {id:?}"))?;
             prepared_destinations.insert(
                 id.clone(),
-                PreparedDestination {
-                    plugin: definition.plugin.clone(),
-                    spec: definition.spec.clone(),
-                },
+                (
+                    PreparedDestination {
+                        plugin: definition.plugin.clone(),
+                        spec: definition.spec.clone(),
+                    },
+                    Vec::<RoutePluginInput>::new(),
+                ),
             );
         }
 
         let mut routes = HashMap::new();
         for route in &config.routes {
-            let (source, validated) = prepared_sources
-                .get_mut(&route.src)
+            let source = prepared_sources
+                .get_mut(&route.src.id)
                 .expect("base validation checked source references");
-            validate_template(&route.message, &validated.allowed_template_variables)
-                .with_context(|| format!("invalid message template on route {:?}", route.id))?;
-            source.route_ids.push(route.id.clone());
+            source.route_inputs.push(RoutePluginInput {
+                route_id: route.id.clone(),
+                input: route.src.input.clone(),
+            });
+            let (_, destination_inputs) = prepared_destinations
+                .get_mut(&route.dst.id)
+                .expect("base validation checked destination references");
+            destination_inputs.push(RoutePluginInput {
+                route_id: route.id.clone(),
+                input: route.dst.input.clone(),
+            });
             routes.insert(
                 route.id.clone(),
                 PreparedRoute {
-                    source_id: route.src.clone(),
+                    source_id: route.src.id.clone(),
                     source_plugin: source.plugin.clone(),
-                    destination_id: route.dst.clone(),
+                    destination_id: route.dst.id.clone(),
+                    destination_input: route.dst.input.clone(),
                     message_template: route.message.clone(),
                 },
             );
         }
 
+        let mut validated_sources = HashMap::new();
+        for (id, source) in &prepared_sources {
+            let plugin = self
+                .sources
+                .get(&source.plugin)
+                .expect("prepared source plugin must be registered");
+            let validated = plugin
+                .validate_spec(&source.spec, &source.route_inputs)
+                .with_context(|| format!("invalid source definition {id:?}"))?;
+            for path in &validated.http_paths {
+                validate_http_path(path)
+                    .with_context(|| format!("invalid webhook path on source {id:?}"))?;
+            }
+            validated_sources.insert(id.clone(), validated);
+        }
+
+        for (id, (destination, inputs)) in &prepared_destinations {
+            let plugin = self
+                .destinations
+                .get(&destination.plugin)
+                .expect("prepared destination plugin must be registered");
+            plugin
+                .validate_spec(&destination.spec, inputs)
+                .with_context(|| format!("invalid destination definition {id:?}"))?;
+        }
+
+        for route in &config.routes {
+            let validated = validated_sources
+                .get(&route.src.id)
+                .expect("source validation must exist");
+            validate_template(&route.message, &validated.allowed_template_variables)
+                .with_context(|| format!("invalid message template on route {:?}", route.id))?;
+        }
+
         let mut active_paths = HashMap::new();
-        for (source_id, (source, validated)) in &prepared_sources {
-            if source.route_ids.is_empty() {
+        for (source_id, source) in &prepared_sources {
+            if source.route_inputs.is_empty() {
                 continue;
             }
+            let validated = validated_sources
+                .get(source_id)
+                .expect("source validation must exist");
             for path in &validated.http_paths {
                 if let Some(existing) = active_paths.insert(path.clone(), source_id.clone()) {
                     bail!(
@@ -260,11 +310,14 @@ impl RuntimeBuilder {
             destinations: self.destinations.clone(),
             prepared_sources: prepared_sources
                 .into_iter()
-                .filter_map(|(id, (source, _))| {
-                    (!source.route_ids.is_empty()).then_some((id, source))
+                .filter_map(|(id, source)| {
+                    (!source.route_inputs.is_empty()).then_some((id, source))
                 })
                 .collect(),
-            prepared_destinations,
+            prepared_destinations: prepared_destinations
+                .into_iter()
+                .map(|(id, (destination, _))| (id, destination))
+                .collect(),
             routes: Arc::new(routes),
             ready: Arc::new(AtomicBool::new(false)),
         })
@@ -330,7 +383,7 @@ impl Runtime {
                 source_id: source_id.clone(),
                 public_base_url: self.config.server.public_base_url.clone(),
                 spec: source.spec.clone(),
-                route_ids: source.route_ids.clone(),
+                route_inputs: source.route_inputs.clone(),
                 sink: sink.clone(),
             };
             plugin
@@ -425,7 +478,14 @@ async fn delivery_worker(
             continue;
         };
 
-        match plugin.deliver(&destination.spec, &delivery.message).await {
+        match plugin
+            .deliver(
+                &destination.spec,
+                &route.destination_input,
+                &delivery.message,
+            )
+            .await
+        {
             Ok(()) => {
                 if let Err(error) = storage.complete(delivery.id) {
                     error!(worker_id, %error, "failed to complete delivery");
@@ -503,6 +563,7 @@ mod tests {
                 name: "test-source",
                 description: "test",
                 spec_schema: json!({}),
+                input_schema: json!({}),
             }
         }
 
@@ -514,7 +575,11 @@ mod tests {
             vec!["event".into()]
         }
 
-        fn validate_spec(&self, _spec: &Value) -> Result<ValidatedSource> {
+        fn validate_spec(
+            &self,
+            _spec: &Value,
+            _inputs: &[RoutePluginInput],
+        ) -> Result<ValidatedSource> {
             Ok(ValidatedSource {
                 allowed_template_variables: self.template_variables(),
                 http_paths: vec!["/hooks/test".into()],
@@ -539,14 +604,20 @@ mod tests {
                 name: "test-destination",
                 description: "test",
                 spec_schema: json!({}),
+                input_schema: json!({}),
             }
         }
 
-        fn validate_spec(&self, _spec: &Value) -> Result<()> {
+        fn validate_spec(&self, _spec: &Value, _inputs: &[RoutePluginInput]) -> Result<()> {
             Ok(())
         }
 
-        async fn deliver(&self, _spec: &Value, _message: &str) -> Result<(), DeliveryError> {
+        async fn deliver(
+            &self,
+            _spec: &Value,
+            _input: &Value,
+            _message: &str,
+        ) -> Result<(), DeliveryError> {
             Ok(())
         }
     }
@@ -577,8 +648,14 @@ mod tests {
             )]),
             routes: vec![RouteConfig {
                 id: "route".into(),
-                src: "source".into(),
-                dst: "destination".into(),
+                src: RouteEndpointConfig {
+                    id: "source".into(),
+                    input: json!({}),
+                },
+                dst: RouteEndpointConfig {
+                    id: "destination".into(),
+                    input: json!({}),
+                },
                 message: "{{ event.id }}".into(),
             }],
         }
@@ -617,6 +694,7 @@ mod tests {
                     name: self.0,
                     description: "test",
                     spec_schema: json!({}),
+                    input_schema: json!({}),
                 }
             }
 
@@ -628,7 +706,11 @@ mod tests {
                 vec!["event".into()]
             }
 
-            fn validate_spec(&self, spec: &Value) -> Result<ValidatedSource> {
+            fn validate_spec(
+                &self,
+                spec: &Value,
+                _inputs: &[RoutePluginInput],
+            ) -> Result<ValidatedSource> {
                 Ok(ValidatedSource {
                     allowed_template_variables: self.template_variables(),
                     http_paths: vec![spec["path"].as_str().context("path")?.into()],
@@ -667,8 +749,14 @@ mod tests {
         );
         config.routes.push(RouteConfig {
             id: "other-route".into(),
-            src: "other".into(),
-            dst: "destination".into(),
+            src: RouteEndpointConfig {
+                id: "other".into(),
+                input: json!({}),
+            },
+            dst: RouteEndpointConfig {
+                id: "destination".into(),
+                input: json!({}),
+            },
             message: "{{ event.id }}".into(),
         });
         assert!(
@@ -718,6 +806,7 @@ mod tests {
                     name: "counting-source",
                     description: "test",
                     spec_schema: json!({}),
+                    input_schema: json!({}),
                 }
             }
 
@@ -729,7 +818,11 @@ mod tests {
                 vec!["event".into()]
             }
 
-            fn validate_spec(&self, _spec: &Value) -> Result<ValidatedSource> {
+            fn validate_spec(
+                &self,
+                _spec: &Value,
+                _inputs: &[RoutePluginInput],
+            ) -> Result<ValidatedSource> {
                 SOURCE_VALIDATIONS.fetch_add(1, Ordering::Relaxed);
                 Ok(ValidatedSource {
                     allowed_template_variables: self.template_variables(),
@@ -755,15 +848,21 @@ mod tests {
                     name: "counting-destination",
                     description: "test",
                     spec_schema: json!({}),
+                    input_schema: json!({}),
                 }
             }
 
-            fn validate_spec(&self, _spec: &Value) -> Result<()> {
+            fn validate_spec(&self, _spec: &Value, _inputs: &[RoutePluginInput]) -> Result<()> {
                 DESTINATION_VALIDATIONS.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
 
-            async fn deliver(&self, _spec: &Value, _message: &str) -> Result<(), DeliveryError> {
+            async fn deliver(
+                &self,
+                _spec: &Value,
+                _input: &Value,
+                _message: &str,
+            ) -> Result<(), DeliveryError> {
                 Ok(())
             }
         }
@@ -774,8 +873,14 @@ mod tests {
         config.dsts.get_mut("destination").unwrap().plugin = "counting-destination".into();
         config.routes.push(RouteConfig {
             id: "second".into(),
-            src: "source".into(),
-            dst: "destination".into(),
+            src: RouteEndpointConfig {
+                id: "source".into(),
+                input: json!({"route": "second"}),
+            },
+            dst: RouteEndpointConfig {
+                id: "destination".into(),
+                input: json!({"route": "second"}),
+            },
             message: "second: {{ event.id }}".into(),
         });
         let runtime = RuntimeBuilder::new()
@@ -786,7 +891,7 @@ mod tests {
 
         assert_eq!(SOURCE_VALIDATIONS.load(Ordering::Relaxed), 1);
         assert_eq!(DESTINATION_VALIDATIONS.load(Ordering::Relaxed), 1);
-        assert_eq!(runtime.prepared_sources["source"].route_ids.len(), 2);
+        assert_eq!(runtime.prepared_sources["source"].route_inputs.len(), 2);
         assert_ne!(
             runtime.routes["route"].message_template,
             runtime.routes["second"].message_template

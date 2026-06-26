@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use notifier_runtime::{DeliveryError, DestinationPlugin, PluginMetadata, schema_value};
+use notifier_runtime::{
+    DeliveryError, DestinationPlugin, PluginMetadata, RoutePluginInput, schema_value,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -30,6 +32,11 @@ impl Default for DiscordDestination {
 #[serde(deny_unknown_fields)]
 struct Spec {
     bot_token: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Input {
     channel_id: String,
 }
 
@@ -38,13 +45,19 @@ fn parse_spec(value: &Value) -> Result<Spec> {
     if spec.bot_token.trim().is_empty() {
         anyhow::bail!("bot_token cannot be empty");
     }
-    if spec.channel_id.trim().is_empty() {
+    Ok(spec)
+}
+
+fn parse_input(value: &Value) -> Result<Input> {
+    let input: Input = serde_json::from_value(value.clone()).context("invalid Discord input")?;
+    if input.channel_id.trim().is_empty() {
         anyhow::bail!("channel_id cannot be empty");
     }
-    spec.channel_id
+    input
+        .channel_id
         .parse::<u64>()
         .context("channel_id must be an unsigned integer")?;
-    Ok(spec)
+    Ok(input)
 }
 
 #[async_trait]
@@ -54,22 +67,36 @@ impl DestinationPlugin for DiscordDestination {
             name: "discord",
             description: "Sends plain-text Discord channel messages with mentions disabled.",
             spec_schema: schema_value::<Spec>(),
+            input_schema: schema_value::<Input>(),
         }
     }
 
-    fn validate_spec(&self, spec: &Value) -> Result<()> {
-        parse_spec(spec).map(|_| ())
+    fn validate_spec(&self, spec: &Value, inputs: &[RoutePluginInput]) -> Result<()> {
+        parse_spec(spec)?;
+        for route in inputs {
+            parse_input(&route.input).with_context(|| {
+                format!("invalid destination input on route {:?}", route.route_id)
+            })?;
+        }
+        Ok(())
     }
 
-    async fn deliver(&self, spec: &Value, message: &str) -> Result<(), DeliveryError> {
+    async fn deliver(
+        &self,
+        spec: &Value,
+        input: &Value,
+        message: &str,
+    ) -> Result<(), DeliveryError> {
         let spec = parse_spec(spec).map_err(|error| DeliveryError::permanent(error.to_string()))?;
+        let input =
+            parse_input(input).map_err(|error| DeliveryError::permanent(error.to_string()))?;
         if message.chars().count() > 2_000 {
             return Err(DeliveryError::permanent(
                 "Discord message exceeds 2,000 characters",
             ));
         }
         let channel_id =
-            ChannelId::new(spec.channel_id.parse().map_err(|error| {
+            ChannelId::new(input.channel_id.parse().map_err(|error| {
                 DeliveryError::permanent(format!("invalid channel ID: {error}"))
             })?);
         let http = Http::new(&spec.bot_token);
@@ -122,7 +149,13 @@ mod tests {
         let plugin = DiscordDestination::new();
         assert_eq!(plugin.metadata().name, "discord");
         plugin
-            .validate_spec(&json!({"bot_token": "x", "channel_id": "1"}))
+            .validate_spec(
+                &json!({"bot_token": "x"}),
+                &[RoutePluginInput {
+                    route_id: "route".into(),
+                    input: json!({"channel_id": "1"}),
+                }],
+            )
             .unwrap();
     }
 }

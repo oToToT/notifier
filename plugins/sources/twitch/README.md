@@ -11,7 +11,7 @@ The plugin name used in Notifier configuration is `twitch`.
 At startup, the plugin:
 
 - Requests a Twitch app access token from `client_id` and `client_secret`.
-- Resolves each configured broadcaster login to a broadcaster ID.
+- Resolves each unique broadcaster login from active route inputs to a broadcaster ID.
 - Lists existing `stream.online` EventSub subscriptions.
 - Creates missing webhook subscriptions for `public_base_url + webhook_path`.
 
@@ -29,7 +29,7 @@ deleted.
 
 ## Configuration
 
-Use this plugin in the `srcs` map:
+Use this plugin in the `srcs` map, then provide route-local broadcaster inputs from routes:
 
 ```json
 {
@@ -40,11 +40,26 @@ Use this plugin in the `srcs` map:
         "webhook_path": "/hooks/twitch-example",
         "client_id": "your-twitch-client-id",
         "client_secret": "your-twitch-client-secret",
-        "webhook_secret": "a-shared-secret",
-        "broadcasters": ["example_login", "another_login"]
+        "webhook_secret": "a-shared-secret"
       }
     }
-  }
+  },
+  "routes": [
+    {
+      "id": "twitch-example-to-destination",
+      "src": {
+        "id": "twitch-example",
+        "input": {
+          "broadcasters": ["example_login", "another_login"]
+        }
+      },
+      "dst": {
+        "id": "destination-id",
+        "input": {}
+      },
+      "message": "{{ broadcaster.name }} is live"
+    }
+  ]
 }
 ```
 
@@ -54,7 +69,11 @@ Spec fields:
 - `client_id`: Twitch application client ID.
 - `client_secret`: Twitch application client secret.
 - `webhook_secret`: EventSub webhook secret, 10 to 100 characters.
+
+Route input fields:
+
 - `broadcasters`: one or more Twitch broadcaster logins; ASCII letters, numbers, and `_`.
+  Duplicate names in one route input are rejected case-insensitively.
 
 The runtime validates the webhook path. It must be a non-root absolute path, have no
 trailing slash, contain no query, fragment, captures, or wildcards, and not be `/health` or

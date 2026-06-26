@@ -40,17 +40,21 @@ Plugin names must be unique within their category.
 
 `SourcePlugin` provides:
 
-- Plugin metadata and a JSON Schema for its reusable source specification.
+- Plugin metadata and JSON Schemas for its reusable source specification and route-local
+  source input.
 - A schema and documented top-level variables for its template context.
-- Startup validation, including the HTTP paths it exposes.
+- Startup validation for the shared specification plus all route inputs using one source
+  instance, including the HTTP paths it exposes.
 - An Axum webhook router for one source definition.
 - Startup reconciliation of external provider subscriptions.
 
 `DestinationPlugin` provides:
 
-- Plugin metadata and a JSON Schema for its reusable destination specification.
-- Startup validation.
-- Asynchronous delivery with transient or permanent error classification.
+- Plugin metadata and JSON Schemas for its reusable destination specification and
+  route-local destination input.
+- Startup validation for the shared specification plus route inputs.
+- Asynchronous delivery with route-local input and transient or permanent error
+  classification.
 
 `EventSink` is passed to source plugins. It renders destination templates and transactionally
 persists one delivery per matching route.
@@ -82,8 +86,7 @@ Notifier reads one JSON file at startup:
         "webhook_path": "/hooks/twitch-example",
         "client_id": "...",
         "client_secret": "...",
-        "webhook_secret": "...",
-        "broadcaster": "example"
+        "webhook_secret": "..."
       }
     }
   },
@@ -91,26 +94,36 @@ Notifier reads one JSON file at startup:
     "discord-main": {
       "plugin": "discord",
       "spec": {
-        "bot_token": "...",
-        "channel_id": "123"
+        "bot_token": "..."
       }
     }
   },
   "routes": [
     {
       "id": "twitch-example-to-discord",
-      "src": "twitch-example",
-      "dst": "discord-main",
+      "src": {
+        "id": "twitch-example",
+        "input": {
+          "broadcasters": ["example"]
+        }
+      },
+      "dst": {
+        "id": "discord-main",
+        "input": {
+          "channel_id": "123"
+        }
+      },
       "message": "{{ broadcaster.name }} is live: {{ stream.title }}\n{{ stream.url }}"
     }
   ]
 }
 ```
 
-`srcs` and `dsts` are keyed reusable definitions. Each route references one of each and owns
-its template. A source ID can fan out to many routes and is reconciled once. A destination ID
-can be reused with different route templates. All definitions are validated at startup;
-unreferenced definitions remain inactive.
+`srcs` and `dsts` are keyed reusable plugin instances. Each route references one of each and
+owns plugin-defined `src.input`, `dst.input`, and its template. A source ID can fan out to
+many routes and is reconciled once using the union of its active route inputs. A destination
+ID can be reused with different route templates and different route-local destination
+inputs. All definitions are validated at startup; unreferenced definitions remain inactive.
 
 Route IDs must be unique and stable. Configuration changes require a restart. Credentials
 remain literal values in definitions and are never included in application logs.
@@ -182,9 +195,10 @@ The Twitch plugin uses `twitch_api` for:
 - Stream enrichment.
 - EventSub HMAC verification.
 
-At startup, each active source ID resolves the broadcaster ID and creates a missing
-`stream.online` webhook subscription for `public_base_url + webhook_path`. Existing external
-subscriptions not represented in configuration are not deleted.
+At startup, each active source ID resolves every unique broadcaster login from route inputs
+and creates missing `stream.online` webhook subscriptions for `public_base_url +
+webhook_path`. Existing external subscriptions not represented in configuration are not
+deleted.
 
 Webhook handling:
 
@@ -192,7 +206,7 @@ Webhook handling:
 2. Verify the HMAC using that source definition's secret.
 3. Return the raw challenge for callback verification.
 4. Acknowledge revocations.
-5. Match the notification broadcaster to that source definition.
+5. Match the notification broadcaster to route inputs for that source definition.
 6. Query current stream data for title and URL.
 7. Persist rendered deliveries using the Twitch message ID as the deduplication key.
 8. Return a successful response only after persistence completes.
@@ -207,10 +221,10 @@ The TwitCasting plugin uses `twitcasting` for:
 - Webhook listing and registration.
 - Typed webhook decoding.
 
-At startup, each active source ID resolves the broadcaster ID and registers a missing
-`livestart` hook. The application-level callback URL must already be configured to the full
-URL corresponding to that source's `webhook_path`. Unconfigured external hooks are not
-removed.
+At startup, each active source ID resolves every unique broadcaster screen ID from route
+inputs and registers missing `livestart` hooks. The application-level callback URL must
+already be configured to the full URL corresponding to that source's `webhook_path`.
+Unconfigured external hooks are not removed.
 
 TwitCasting provides an opaque signature in the webhook body rather than a documented HMAC
 algorithm. The plugin compares it with the configured application signature and matches the
@@ -223,16 +237,16 @@ movie ID.
 
 ### Discord
 
-The Discord plugin uses `serenity` to send a channel message using a bot token and channel
-ID. Allowed mentions are empty by default, preventing user, role, and everyone mentions from
-being expanded.
+The Discord plugin uses `serenity` to send a channel message using a shared bot token and
+route-local channel ID. Allowed mentions are empty by default, preventing user, role, and
+everyone mentions from being expanded.
 
 Messages over 2,000 Unicode code points are permanent failures.
 
 ### Telegram
 
-The Telegram plugin uses `teloxide` to call `sendMessage` with a bot token and numeric chat
-ID. It does not receive commands or updates.
+The Telegram plugin uses `teloxide` to call `sendMessage` with a shared bot token and
+route-local numeric chat ID. It does not receive commands or updates.
 
 Messages over 4,096 Unicode code points are permanent failures.
 

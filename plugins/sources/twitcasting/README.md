@@ -10,7 +10,7 @@ The plugin name used in Notifier configuration is `twitcasting`.
 
 At startup, the plugin:
 
-- Resolves each configured broadcaster screen ID.
+- Resolves each unique broadcaster screen ID from active route inputs.
 - Lists TwitCasting webhooks for the application.
 - Registers a missing `livestart` webhook for each broadcaster.
 
@@ -19,7 +19,7 @@ At webhook time, the plugin:
 - Decodes the TwitCasting webhook payload.
 - Accepts only `livestart` events.
 - Compares the payload signature with the configured application signature.
-- Ensures the payload broadcaster matches a configured broadcaster.
+- Ensures the payload broadcaster matches at least one route input.
 - Ensures the movie belongs to that broadcaster.
 - Enqueues one rendered delivery per matching route through `notifier-runtime`.
 
@@ -32,7 +32,7 @@ deleted.
 
 ## Configuration
 
-Use this plugin in the `srcs` map:
+Use this plugin in the `srcs` map, then provide route-local broadcaster inputs from routes:
 
 ```json
 {
@@ -43,11 +43,26 @@ Use this plugin in the `srcs` map:
         "webhook_path": "/hooks/twitcasting-example",
         "client_id": "your-twitcasting-client-id",
         "client_secret": "your-twitcasting-client-secret",
-        "webhook_signature": "application-webhook-signature",
-        "broadcasters": ["example_screen_id", "another_screen_id"]
+        "webhook_signature": "application-webhook-signature"
       }
     }
-  }
+  },
+  "routes": [
+    {
+      "id": "twitcasting-example-to-destination",
+      "src": {
+        "id": "twitcasting-example",
+        "input": {
+          "broadcasters": ["example_screen_id", "another_screen_id"]
+        }
+      },
+      "dst": {
+        "id": "destination-id",
+        "input": {}
+      },
+      "message": "{{ broadcaster.name }} started"
+    }
+  ]
 }
 ```
 
@@ -57,8 +72,12 @@ Spec fields:
 - `client_id`: TwitCasting application client ID.
 - `client_secret`: TwitCasting application client secret.
 - `webhook_signature`: application webhook signature expected in webhook payloads.
-- `broadcasters`: one or more TwitCasting broadcaster screen IDs.
 - `api_base_url`: optional API base URL, default `https://apiv2.twitcasting.tv`.
+
+Route input fields:
+
+- `broadcasters`: one or more TwitCasting broadcaster screen IDs. Duplicate names in one
+  route input are rejected case-insensitively.
 
 The runtime validates the webhook path. It must be a non-root absolute path, have no
 trailing slash, contain no query, fragment, captures, or wildcards, and not be `/health` or

@@ -17,8 +17,7 @@
         "webhook_path": "/hooks/twitch-example",
         "client_id": "replace-me",
         "client_secret": "replace-me",
-        "webhook_secret": "replace-with-10-to-100-characters",
-        "broadcasters": ["example", "another_example"]
+        "webhook_secret": "replace-with-10-to-100-characters"
       }
     }
   },
@@ -26,16 +25,25 @@
     "discord-main": {
       "plugin": "discord",
       "spec": {
-        "bot_token": "replace-me",
-        "channel_id": "1234567890"
+        "bot_token": "replace-me"
       }
     }
   },
   "routes": [
     {
       "id": "twitch-example-to-discord",
-      "src": "twitch-example",
-      "dst": "discord-main",
+      "src": {
+        "id": "twitch-example",
+        "input": {
+          "broadcasters": ["example", "another_example"]
+        }
+      },
+      "dst": {
+        "id": "discord-main",
+        "input": {
+          "channel_id": "1234567890"
+        }
+      },
       "message": "{{ broadcaster.name }} is live: {{ stream.title }}\n{{ stream.url }}"
     }
   ]

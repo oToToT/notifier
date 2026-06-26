@@ -20,7 +20,7 @@ run a Telegram bot dispatcher.
 
 ## Configuration
 
-Use this plugin in the `dsts` map:
+Use this plugin in the `dsts` map, then provide route-local chat inputs from routes:
 
 ```json
 {
@@ -28,20 +28,39 @@ Use this plugin in the `dsts` map:
     "telegram-main": {
       "plugin": "telegram",
       "spec": {
-        "bot_token": "your-telegram-bot-token",
-        "chat_id": "-1001234567890"
+        "bot_token": "your-telegram-bot-token"
       }
     }
-  }
+  },
+  "routes": [
+    {
+      "id": "source-to-telegram",
+      "src": {
+        "id": "source-id",
+        "input": {}
+      },
+      "dst": {
+        "id": "telegram-main",
+        "input": {
+          "chat_id": "-1001234567890"
+        }
+      },
+      "message": "message text"
+    }
+  ]
 }
 ```
 
 Spec fields:
 
 - `bot_token`: Telegram bot token.
+
+Route input fields:
+
 - `chat_id`: target Telegram chat ID as a signed integer string.
 
-Both fields are required and must be non-empty. `chat_id` must parse as `i64`.
+Both fields are required in their respective locations and must be non-empty. `chat_id` must
+parse as `i64`.
 
 ## Failure handling
 
@@ -53,7 +72,7 @@ The plugin returns `DeliveryError::Transient` for:
 
 The plugin returns `DeliveryError::Permanent` for:
 
-- invalid plugin specs
+- invalid plugin specs or route inputs
 - messages over 4,096 Unicode scalar values
 - other Telegram API errors
 

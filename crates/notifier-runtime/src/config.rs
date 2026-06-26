@@ -56,9 +56,16 @@ impl Default for DeliveryConfig {
 #[serde(deny_unknown_fields)]
 pub struct RouteConfig {
     pub id: String,
-    pub src: String,
-    pub dst: String,
+    pub src: RouteEndpointConfig,
+    pub dst: RouteEndpointConfig,
     pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteEndpointConfig {
+    pub id: String,
+    pub input: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -103,24 +110,24 @@ impl Config {
             if !ids.insert(&route.id) {
                 bail!("duplicate route ID {:?}", route.id);
             }
-            if route.src.trim().is_empty() {
+            if route.src.id.trim().is_empty() {
                 bail!("route {:?} source reference cannot be empty", route.id);
             }
-            if route.dst.trim().is_empty() {
+            if route.dst.id.trim().is_empty() {
                 bail!("route {:?} destination reference cannot be empty", route.id);
             }
-            if !self.srcs.contains_key(&route.src) {
+            if !self.srcs.contains_key(&route.src.id) {
                 bail!(
                     "route {:?} references missing source {:?}",
                     route.id,
-                    route.src
+                    route.src.id
                 );
             }
-            if !self.dsts.contains_key(&route.dst) {
+            if !self.dsts.contains_key(&route.dst.id) {
                 bail!(
                     "route {:?} references missing destination {:?}",
                     route.id,
-                    route.dst
+                    route.dst.id
                 );
             }
             if route.message.trim().is_empty() {
@@ -164,8 +171,14 @@ mod tests {
             dsts: HashMap::from([("destination".into(), plugin)]),
             routes: vec![RouteConfig {
                 id: "route".into(),
-                src: "source".into(),
-                dst: "destination".into(),
+                src: RouteEndpointConfig {
+                    id: "source".into(),
+                    input: Value::Null,
+                },
+                dst: RouteEndpointConfig {
+                    id: "destination".into(),
+                    input: Value::Null,
+                },
                 message: "test".into(),
             }],
         }
@@ -176,8 +189,14 @@ mod tests {
         let mut config = config();
         config.routes.push(RouteConfig {
             id: "route".into(),
-            src: "source".into(),
-            dst: "destination".into(),
+            src: RouteEndpointConfig {
+                id: "source".into(),
+                input: Value::Null,
+            },
+            dst: RouteEndpointConfig {
+                id: "destination".into(),
+                input: Value::Null,
+            },
             message: "test".into(),
         });
         assert!(
@@ -193,12 +212,12 @@ mod tests {
     fn rejects_empty_ids_and_missing_references() {
         let mut value = serde_json::to_value(config()).unwrap();
         value["srcs"] = json!({"": {"plugin": "x", "spec": null}});
-        value["routes"][0]["src"] = json!("");
+        value["routes"][0]["src"] = json!({"id": "", "input": null});
         let invalid: Config = serde_json::from_value(value).unwrap();
         assert!(invalid.validate_base().is_err());
 
         let mut config = config();
-        config.routes[0].dst = "missing".into();
+        config.routes[0].dst.id = "missing".into();
         assert!(
             config
                 .validate_base()

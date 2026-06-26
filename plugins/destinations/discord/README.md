@@ -20,7 +20,7 @@ interactions, or inbound Discord events.
 
 ## Configuration
 
-Use this plugin in the `dsts` map:
+Use this plugin in the `dsts` map, then provide route-local channel inputs from routes:
 
 ```json
 {
@@ -28,20 +28,39 @@ Use this plugin in the `dsts` map:
     "discord-main": {
       "plugin": "discord",
       "spec": {
-        "bot_token": "your-discord-bot-token",
-        "channel_id": "123456789012345678"
+        "bot_token": "your-discord-bot-token"
       }
     }
-  }
+  },
+  "routes": [
+    {
+      "id": "source-to-discord",
+      "src": {
+        "id": "source-id",
+        "input": {}
+      },
+      "dst": {
+        "id": "discord-main",
+        "input": {
+          "channel_id": "123456789012345678"
+        }
+      },
+      "message": "message text"
+    }
+  ]
 }
 ```
 
 Spec fields:
 
 - `bot_token`: Discord bot token used by `serenity::http::Http`.
+
+Route input fields:
+
 - `channel_id`: target Discord channel ID as an unsigned integer string.
 
-Both fields are required and must be non-empty. `channel_id` must parse as `u64`.
+Both fields are required in their respective locations and must be non-empty. `channel_id`
+must parse as `u64`.
 
 ## Failure handling
 
@@ -53,7 +72,7 @@ The plugin returns `DeliveryError::Transient` for:
 
 The plugin returns `DeliveryError::Permanent` for:
 
-- invalid plugin specs
+- invalid plugin specs or route inputs
 - messages over 2,000 Unicode scalar values
 - other Discord HTTP `4xx` responses
 - unexpected Serenity errors

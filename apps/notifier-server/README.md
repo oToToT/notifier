@@ -20,8 +20,9 @@ cargo run -p notifier-server -- schema
 cargo run -p notifier-server -- serve --config config.json
 ```
 
-`check-config` validates the file, plugin names, plugin specs, and route templates without
-opening SQLite or contacting Twitch, TwitCasting, Discord, or Telegram.
+`check-config` validates the file, plugin names, shared plugin specs, route-local plugin
+inputs, and route templates without opening SQLite or contacting Twitch, TwitCasting,
+Discord, or Telegram.
 
 `schema` prints the combined runtime configuration schema, every registered plugin spec
 schema, and each source plugin's template context documentation.
@@ -54,8 +55,7 @@ The default configuration path is `config.json`. Start from the repository-level
         "webhook_path": "/hooks/twitch-example",
         "client_id": "...",
         "client_secret": "...",
-        "webhook_secret": "...",
-        "broadcaster": "example"
+        "webhook_secret": "..."
       }
     }
   },
@@ -63,25 +63,34 @@ The default configuration path is `config.json`. Start from the repository-level
     "discord-main": {
       "plugin": "discord",
       "spec": {
-        "bot_token": "...",
-        "channel_id": "1234567890"
+        "bot_token": "..."
       }
     }
   },
   "routes": [
     {
       "id": "twitch-example-to-discord",
-      "src": "twitch-example",
-      "dst": "discord-main",
+      "src": {
+        "id": "twitch-example",
+        "input": {
+          "broadcasters": ["example"]
+        }
+      },
+      "dst": {
+        "id": "discord-main",
+        "input": {
+          "channel_id": "1234567890"
+        }
+      },
       "message": "{{ broadcaster.name }} is live: {{ stream.title }}\n{{ stream.url }}"
     }
   ]
 }
 ```
 
-Source and destination definitions are reusable maps. Routes reference those IDs and own
-their MiniJinja message templates. Route IDs must be unique and should remain stable across
-restarts because they are part of delivery state.
+Source and destination definitions are reusable maps. Routes reference those IDs, provide
+plugin-defined route-local inputs, and own their MiniJinja message templates. Route IDs must
+be unique and should remain stable across restarts because they are part of delivery state.
 
 ## HTTP endpoints
 

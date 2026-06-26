@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use notifier_runtime::{DeliveryError, DestinationPlugin, PluginMetadata, schema_value};
+use notifier_runtime::{
+    DeliveryError, DestinationPlugin, PluginMetadata, RoutePluginInput, schema_value,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -25,6 +27,11 @@ impl Default for TelegramDestination {
 #[serde(deny_unknown_fields)]
 struct Spec {
     bot_token: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Input {
     chat_id: String,
 }
 
@@ -33,13 +40,19 @@ fn parse_spec(value: &Value) -> Result<Spec> {
     if spec.bot_token.trim().is_empty() {
         anyhow::bail!("bot_token cannot be empty");
     }
-    if spec.chat_id.trim().is_empty() {
+    Ok(spec)
+}
+
+fn parse_input(value: &Value) -> Result<Input> {
+    let input: Input = serde_json::from_value(value.clone()).context("invalid Telegram input")?;
+    if input.chat_id.trim().is_empty() {
         anyhow::bail!("chat_id cannot be empty");
     }
-    spec.chat_id
+    input
+        .chat_id
         .parse::<i64>()
         .context("chat_id must be a signed integer")?;
-    Ok(spec)
+    Ok(input)
 }
 
 #[async_trait]
@@ -49,21 +62,35 @@ impl DestinationPlugin for TelegramDestination {
             name: "telegram",
             description: "Sends plain-text messages with the Telegram Bot API sendMessage method.",
             spec_schema: schema_value::<Spec>(),
+            input_schema: schema_value::<Input>(),
         }
     }
 
-    fn validate_spec(&self, spec: &Value) -> Result<()> {
-        parse_spec(spec).map(|_| ())
+    fn validate_spec(&self, spec: &Value, inputs: &[RoutePluginInput]) -> Result<()> {
+        parse_spec(spec)?;
+        for route in inputs {
+            parse_input(&route.input).with_context(|| {
+                format!("invalid destination input on route {:?}", route.route_id)
+            })?;
+        }
+        Ok(())
     }
 
-    async fn deliver(&self, spec: &Value, message: &str) -> Result<(), DeliveryError> {
+    async fn deliver(
+        &self,
+        spec: &Value,
+        input: &Value,
+        message: &str,
+    ) -> Result<(), DeliveryError> {
         let spec = parse_spec(spec).map_err(|error| DeliveryError::permanent(error.to_string()))?;
+        let input =
+            parse_input(input).map_err(|error| DeliveryError::permanent(error.to_string()))?;
         if message.chars().count() > 4_096 {
             return Err(DeliveryError::permanent(
                 "Telegram message exceeds 4,096 characters",
             ));
         }
-        let chat_id = spec
+        let chat_id = input
             .chat_id
             .parse::<i64>()
             .map(ChatId)
@@ -92,6 +119,7 @@ fn classify_error(error: RequestError) -> DeliveryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use teloxide::types::Seconds;
 
     #[test]
@@ -100,5 +128,31 @@ mod tests {
             classify_error(RequestError::RetryAfter(Seconds::from_seconds(1))),
             DeliveryError::Transient(_)
         ));
+    }
+
+    #[test]
+    fn validates_shared_token_and_route_input() {
+        let plugin = TelegramDestination::new();
+        plugin
+            .validate_spec(
+                &json!({"bot_token": "x"}),
+                &[RoutePluginInput {
+                    route_id: "route".into(),
+                    input: json!({"chat_id": "-1001"}),
+                }],
+            )
+            .unwrap();
+
+        assert!(
+            plugin
+                .validate_spec(
+                    &json!({"bot_token": "x"}),
+                    &[RoutePluginInput {
+                        route_id: "route".into(),
+                        input: json!({"chat_id": "not-an-int"}),
+                    }],
+                )
+                .is_err()
+        );
     }
 }

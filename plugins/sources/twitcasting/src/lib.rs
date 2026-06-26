@@ -9,7 +9,7 @@ use axum::{
     routing::post,
 };
 use notifier_runtime::{
-    PluginMetadata, SourceContext, SourcePlugin, ValidatedSource, schema_value,
+    PluginMetadata, RoutePluginInput, SourceContext, SourcePlugin, ValidatedSource, schema_value,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -44,9 +44,14 @@ struct Spec {
     client_id: String,
     client_secret: String,
     webhook_signature: String,
-    broadcasters: Vec<String>,
     #[serde(default = "default_api_base_url")]
     api_base_url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Input {
+    broadcasters: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
@@ -98,25 +103,25 @@ fn parse_spec(value: &Value) -> Result<Spec> {
             bail!("{name} cannot be empty");
         }
     }
-    let broadcasters = broadcasters(&spec)?;
-    if broadcasters.is_empty() {
-        bail!("at least one broadcaster must be configured");
-    }
-    reject_duplicate_broadcasters(&broadcasters)?;
     Ok(spec)
 }
 
-fn broadcasters(spec: &Spec) -> Result<Vec<String>> {
-    let values = spec.broadcasters.clone();
-    for value in &values {
+fn parse_input(value: &Value) -> Result<Input> {
+    let input: Input =
+        serde_json::from_value(value.clone()).context("invalid TwitCasting route input")?;
+    validate_broadcasters(&input.broadcasters)?;
+    Ok(input)
+}
+
+fn validate_broadcasters(values: &[String]) -> Result<()> {
+    if values.is_empty() {
+        bail!("at least one broadcaster must be configured");
+    }
+    for value in values {
         if value.trim().is_empty() {
             bail!("broadcasters cannot contain empty values");
         }
     }
-    Ok(values)
-}
-
-fn reject_duplicate_broadcasters(values: &[String]) -> Result<()> {
     let mut seen = HashSet::new();
     for value in values {
         if !seen.insert(value.to_ascii_lowercase()) {
@@ -126,6 +131,37 @@ fn reject_duplicate_broadcasters(values: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn configured_broadcasters(inputs: &[RoutePluginInput]) -> Result<Vec<String>> {
+    let mut values = Vec::new();
+    let mut seen = HashSet::new();
+    for route in inputs {
+        let input = parse_input(&route.input)
+            .with_context(|| format!("invalid source input on route {:?}", route.route_id))?;
+        for broadcaster in input.broadcasters {
+            if seen.insert(broadcaster.to_ascii_lowercase()) {
+                values.push(broadcaster);
+            }
+        }
+    }
+    Ok(values)
+}
+
+fn matching_route_ids(inputs: &[RoutePluginInput], broadcaster: &str) -> Result<Vec<String>> {
+    let mut route_ids = Vec::new();
+    for route in inputs {
+        let input = parse_input(&route.input)
+            .with_context(|| format!("invalid source input on route {:?}", route.route_id))?;
+        if input
+            .broadcasters
+            .iter()
+            .any(|configured| configured.eq_ignore_ascii_case(broadcaster))
+        {
+            route_ids.push(route.route_id.clone());
+        }
+    }
+    Ok(route_ids)
+}
+
 #[async_trait]
 impl SourcePlugin for TwitCastingSource {
     fn metadata(&self) -> PluginMetadata {
@@ -133,6 +169,7 @@ impl SourcePlugin for TwitCastingSource {
             name: "twitcasting",
             description: "Receives TwitCasting livestart webhooks.",
             spec_schema: schema_value::<Spec>(),
+            input_schema: schema_value::<Input>(),
         }
     }
 
@@ -144,8 +181,9 @@ impl SourcePlugin for TwitCastingSource {
         vec!["event".into(), "broadcaster".into(), "movie".into()]
     }
 
-    fn validate_spec(&self, spec: &Value) -> Result<ValidatedSource> {
+    fn validate_spec(&self, spec: &Value, inputs: &[RoutePluginInput]) -> Result<ValidatedSource> {
         let spec = parse_spec(spec)?;
+        configured_broadcasters(inputs)?;
         Ok(ValidatedSource {
             allowed_template_variables: self.template_variables(),
             http_paths: vec![spec.webhook_path],
@@ -162,7 +200,7 @@ impl SourcePlugin for TwitCastingSource {
     async fn reconcile(&self, context: &SourceContext) -> Result<()> {
         let spec = parse_spec(&context.spec)?;
         let hooks = list_webhooks(&spec).await?;
-        for broadcaster in broadcasters(&spec)? {
+        for broadcaster in configured_broadcasters(&context.route_inputs)? {
             let user_id = resolve_user(&spec, &broadcaster).await?;
             let exists = hooks
                 .webhooks
@@ -196,12 +234,9 @@ fn handle_webhook(state: &WebhookState, body: WebhookPayload) -> Result<()> {
         return Ok(());
     };
     let spec = parse_spec(&state.context.spec)?;
-    let broadcasters = broadcasters(&spec)?;
-    if spec.webhook_signature != signature.expose_secret()
-        || !broadcasters
-            .iter()
-            .any(|configured| configured.eq_ignore_ascii_case(broadcaster.screen_id.as_str()))
-    {
+    let route_ids =
+        matching_route_ids(&state.context.route_inputs, broadcaster.screen_id.as_str())?;
+    if spec.webhook_signature != signature.expose_secret() || route_ids.is_empty() {
         bail!("signature or broadcaster did not match");
     }
     if movie.user_id != broadcaster.id {
@@ -231,12 +266,10 @@ fn handle_webhook(state: &WebhookState, body: WebhookPayload) -> Result<()> {
             "url": movie.link,
         }
     });
-    state.context.sink.ingest(
-        &state.context.source_id,
-        &state.context.route_ids,
-        &dedupe_key,
-        &context,
-    )?;
+    state
+        .context
+        .sink
+        .ingest(&state.context.source_id, &route_ids, &dedupe_key, &context)?;
     Ok(())
 }
 
@@ -285,12 +318,57 @@ mod tests {
             client_id: "client".into(),
             client_secret: "secret".into(),
             webhook_signature: "signature".into(),
-            broadcasters: vec!["example".into(), "another".into()],
             api_base_url: default_api_base_url(),
         };
         let validated = TwitCastingSource::new()
-            .validate_spec(&serde_json::to_value(spec).unwrap())
+            .validate_spec(
+                &serde_json::to_value(spec).unwrap(),
+                &[RoutePluginInput {
+                    route_id: "route".into(),
+                    input: json!({"broadcasters": ["example", "another"]}),
+                }],
+            )
             .unwrap();
         assert_eq!(validated.http_paths, ["/hooks/twitcasting"]);
+    }
+
+    #[test]
+    fn rejects_duplicate_route_broadcasters_case_insensitively() {
+        let spec = serde_json::json!({
+            "webhook_path": "/hooks/twitcasting",
+            "client_id": "client",
+            "client_secret": "secret",
+            "webhook_signature": "signature"
+        });
+        let error = TwitCastingSource::new()
+            .validate_spec(
+                &spec,
+                &[RoutePluginInput {
+                    route_id: "route".into(),
+                    input: json!({"broadcasters": ["Example", "example"]}),
+                }],
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("duplicate broadcaster"));
+    }
+
+    #[test]
+    fn matches_only_routes_with_the_event_broadcaster() {
+        let route_ids = matching_route_ids(
+            &[
+                RoutePluginInput {
+                    route_id: "one".into(),
+                    input: json!({"broadcasters": ["hanon", "kotoha"]}),
+                },
+                RoutePluginInput {
+                    route_id: "two".into(),
+                    input: json!({"broadcasters": ["other"]}),
+                },
+            ],
+            "KOTOHA",
+        )
+        .unwrap();
+
+        assert_eq!(route_ids, ["one"]);
     }
 }

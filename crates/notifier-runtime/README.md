@@ -42,19 +42,27 @@ pub trait SourcePlugin: Send + Sync {
     fn metadata(&self) -> PluginMetadata;
     fn template_context_schema(&self) -> serde_json::Value;
     fn template_variables(&self) -> Vec<String>;
-    fn validate_spec(&self, spec: &serde_json::Value) -> anyhow::Result<ValidatedSource>;
+    fn validate_spec(
+        &self,
+        spec: &serde_json::Value,
+        inputs: &[RoutePluginInput],
+    ) -> anyhow::Result<ValidatedSource>;
     fn router(&self, context: SourceContext) -> axum::Router;
     async fn reconcile(&self, context: &SourceContext) -> anyhow::Result<()>;
 }
 ```
 
-`validate_spec` returns the top-level template variables allowed for routes using that
-source and any HTTP paths the source wants to expose. The runtime validates those paths,
-ensures active paths are unique, and rejects reserved paths.
+`PluginMetadata` includes both `spec_schema` for the reusable source instance and
+`input_schema` for each route's source input. `validate_spec` receives the shared spec plus
+all active route inputs for that source instance. It returns the top-level template
+variables allowed for routes using that source and any HTTP paths the source wants to expose.
+The runtime validates those paths, ensures active paths are unique, and rejects reserved
+paths.
 
 `router` receives a `SourceContext` containing the source ID, public base URL, raw plugin
-spec, active route IDs, and an `EventSink`. Source webhooks call `EventSink::ingest` after
-they authenticate and normalize an event.
+spec, route inputs keyed by route ID, and an `EventSink`. Source webhooks select matching
+route IDs from those inputs and call `EventSink::ingest` after they authenticate and
+normalize an event.
 
 `reconcile` runs during startup before readiness is enabled. Webhook sources use it to
 create missing external subscriptions.
@@ -67,15 +75,26 @@ Destination plugins implement `DestinationPlugin`:
 #[async_trait::async_trait]
 pub trait DestinationPlugin: Send + Sync {
     fn metadata(&self) -> PluginMetadata;
-    fn validate_spec(&self, spec: &serde_json::Value) -> anyhow::Result<()>;
-    async fn deliver(&self, spec: &serde_json::Value, message: &str)
+    fn validate_spec(
+        &self,
+        spec: &serde_json::Value,
+        inputs: &[RoutePluginInput],
+    ) -> anyhow::Result<()>;
+    async fn deliver(
+        &self,
+        spec: &serde_json::Value,
+        input: &serde_json::Value,
+        message: &str,
+    )
         -> Result<(), DeliveryError>;
 }
 ```
 
-Destination implementations classify failures as `DeliveryError::Transient` or
-`DeliveryError::Permanent`. Transient failures are retried until `delivery.max_attempts` is
-reached. Permanent failures are moved directly to dead-letter state.
+`PluginMetadata` includes both `spec_schema` for the reusable destination instance and
+`input_schema` for each route's destination input. Destination implementations classify
+failures as `DeliveryError::Transient` or `DeliveryError::Permanent`. Transient failures are
+retried until `delivery.max_attempts` is reached. Permanent failures are moved directly to
+dead-letter state.
 
 ## Configuration model
 
@@ -86,9 +105,10 @@ reached. Permanent failures are moved directly to dead-letter state.
 - `storage.sqlite_path`: SQLite database path.
 - `delivery.workers`: number of delivery workers, default `4`.
 - `delivery.max_attempts`: retry attempt limit, default `8`.
-- `srcs`: reusable source definitions.
-- `dsts`: reusable destination definitions.
-- `routes`: source-to-destination routes with MiniJinja message templates.
+- `srcs`: reusable source plugin instances.
+- `dsts`: reusable destination plugin instances.
+- `routes`: source-to-destination routes with `src.id`, `src.input`, `dst.id`, `dst.input`,
+  and MiniJinja message templates.
 
 Base validation checks route references, unique route IDs, non-empty IDs, non-empty
 messages, valid delivery settings, and public base URL scheme. Plugin validation is handled
