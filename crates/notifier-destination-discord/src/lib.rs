@@ -31,7 +31,6 @@ impl Default for DiscordDestination {
 struct Spec {
     bot_token: String,
     channel_id: String,
-    message: String,
 }
 
 fn parse_spec(value: &Value) -> Result<Spec> {
@@ -45,9 +44,6 @@ fn parse_spec(value: &Value) -> Result<Spec> {
     spec.channel_id
         .parse::<u64>()
         .context("channel_id must be an unsigned integer")?;
-    if spec.message.trim().is_empty() {
-        anyhow::bail!("message cannot be empty");
-    }
     Ok(spec)
 }
 
@@ -63,12 +59,6 @@ impl DestinationPlugin for DiscordDestination {
 
     fn validate_spec(&self, spec: &Value) -> Result<()> {
         parse_spec(spec).map(|_| ())
-    }
-
-    fn message_template<'a>(&self, spec: &'a Value) -> Result<&'a str> {
-        spec.get("message")
-            .and_then(Value::as_str)
-            .context("message must be a string")
     }
 
     async fn deliver(&self, spec: &Value, message: &str) -> Result<(), DeliveryError> {
@@ -128,18 +118,11 @@ mod tests {
     }
 
     #[test]
-    fn schema_and_message_are_available() {
+    fn schema_is_available() {
         let plugin = DiscordDestination::new();
         assert_eq!(plugin.metadata().name, "discord");
-        assert_eq!(
-            plugin
-                .message_template(&json!({
-                    "bot_token": "x",
-                    "channel_id": "1",
-                    "message": "hello"
-                }))
-                .unwrap(),
-            "hello"
-        );
+        plugin
+            .validate_spec(&json!({"bot_token": "x", "channel_id": "1"}))
+            .unwrap();
     }
 }

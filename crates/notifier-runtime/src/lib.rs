@@ -34,21 +34,16 @@ pub struct PluginMetadata {
 
 #[derive(Clone, Debug)]
 pub struct ValidatedSource {
-    pub watch_key: String,
     pub allowed_template_variables: Vec<String>,
-}
-
-#[derive(Clone)]
-pub struct SourceRoute {
-    pub route_id: String,
-    pub spec: Value,
-    pub watch_key: String,
+    pub http_paths: Vec<String>,
 }
 
 #[derive(Clone)]
 pub struct SourceContext {
+    pub source_id: String,
     pub public_base_url: url::Url,
-    pub routes: Vec<SourceRoute>,
+    pub spec: Value,
+    pub route_ids: Vec<String>,
     pub sink: EventSink,
 }
 
@@ -88,18 +83,28 @@ pub trait SourcePlugin: Send + Sync {
 pub trait DestinationPlugin: Send + Sync {
     fn metadata(&self) -> PluginMetadata;
     fn validate_spec(&self, spec: &Value) -> Result<()>;
-    fn message_template<'a>(&self, spec: &'a Value) -> Result<&'a str>;
     async fn deliver(&self, spec: &Value, message: &str) -> Result<(), DeliveryError>;
 }
 
 #[derive(Clone)]
 struct PreparedRoute {
+    source_id: String,
     source_plugin: String,
-    source_spec: Value,
-    source_watch_key: String,
-    destination_plugin: String,
-    destination_spec: Value,
+    destination_id: String,
     message_template: String,
+}
+
+#[derive(Clone)]
+struct PreparedSource {
+    plugin: String,
+    spec: Value,
+    route_ids: Vec<String>,
+}
+
+#[derive(Clone)]
+struct PreparedDestination {
+    plugin: String,
+    spec: Value,
 }
 
 #[derive(Clone)]
@@ -111,24 +116,27 @@ pub struct EventSink {
 impl EventSink {
     pub fn ingest(
         &self,
-        source_plugin: &str,
+        source_id: &str,
         route_ids: &[String],
         dedupe_key: &str,
         context: &Value,
     ) -> Result<usize> {
         let mut deliveries = Vec::with_capacity(route_ids.len());
+        let mut source_plugin = None;
         for route_id in route_ids {
             let route = self
                 .routes
                 .get(route_id)
                 .with_context(|| format!("source emitted unknown route {route_id:?}"))?;
-            if route.source_plugin != source_plugin {
-                bail!("source plugin mismatch for route {route_id:?}");
+            if route.source_id != source_id {
+                bail!("source ID mismatch for route {route_id:?}");
             }
+            source_plugin = Some(route.source_plugin.as_str());
             let message = render_template(&route.message_template, context)
                 .with_context(|| format!("failed to render route {route_id:?}"))?;
             deliveries.push((route_id.clone(), message));
         }
+        let source_plugin = source_plugin.context("source has no routes")?;
         self.storage
             .enqueue_batch(source_plugin, dedupe_key, &deliveries)
     }
@@ -171,43 +179,92 @@ impl RuntimeBuilder {
 
     pub fn check_config(&self, config: Config) -> Result<Runtime> {
         config.validate_base()?;
+        let mut prepared_sources = HashMap::new();
+        for (id, definition) in &config.srcs {
+            let plugin = self
+                .sources
+                .get(&definition.plugin)
+                .with_context(|| format!("unknown source plugin {:?}", definition.plugin))?;
+            let validated = plugin
+                .validate_spec(&definition.spec)
+                .with_context(|| format!("invalid source definition {id:?}"))?;
+            for path in &validated.http_paths {
+                validate_http_path(path)
+                    .with_context(|| format!("invalid webhook path on source {id:?}"))?;
+            }
+            prepared_sources.insert(
+                id.clone(),
+                (
+                    PreparedSource {
+                        plugin: definition.plugin.clone(),
+                        spec: definition.spec.clone(),
+                        route_ids: Vec::new(),
+                    },
+                    validated,
+                ),
+            );
+        }
+        let mut prepared_destinations = HashMap::new();
+        for (id, definition) in &config.dsts {
+            let plugin = self
+                .destinations
+                .get(&definition.plugin)
+                .with_context(|| format!("unknown destination plugin {:?}", definition.plugin))?;
+            plugin
+                .validate_spec(&definition.spec)
+                .with_context(|| format!("invalid destination definition {id:?}"))?;
+            prepared_destinations.insert(
+                id.clone(),
+                PreparedDestination {
+                    plugin: definition.plugin.clone(),
+                    spec: definition.spec.clone(),
+                },
+            );
+        }
+
         let mut routes = HashMap::new();
         for route in &config.routes {
-            let source = self
-                .sources
-                .get(&route.src.plugin)
-                .with_context(|| format!("unknown source plugin {:?}", route.src.plugin))?;
-            let destination = self
-                .destinations
-                .get(&route.dst.plugin)
-                .with_context(|| format!("unknown destination plugin {:?}", route.dst.plugin))?;
-            let validated = source
-                .validate_spec(&route.src.spec)
-                .with_context(|| format!("invalid source on route {:?}", route.id))?;
-            destination
-                .validate_spec(&route.dst.spec)
-                .with_context(|| format!("invalid destination on route {:?}", route.id))?;
-            let message = destination
-                .message_template(&route.dst.spec)
-                .with_context(|| format!("missing message template on route {:?}", route.id))?;
-            validate_template(message, &validated.allowed_template_variables)
+            let (source, validated) = prepared_sources
+                .get_mut(&route.src)
+                .expect("base validation checked source references");
+            validate_template(&route.message, &validated.allowed_template_variables)
                 .with_context(|| format!("invalid message template on route {:?}", route.id))?;
+            source.route_ids.push(route.id.clone());
             routes.insert(
                 route.id.clone(),
                 PreparedRoute {
-                    source_plugin: route.src.plugin.clone(),
-                    source_spec: route.src.spec.clone(),
-                    source_watch_key: validated.watch_key,
-                    destination_plugin: route.dst.plugin.clone(),
-                    destination_spec: route.dst.spec.clone(),
-                    message_template: message.to_owned(),
+                    source_id: route.src.clone(),
+                    source_plugin: source.plugin.clone(),
+                    destination_id: route.dst.clone(),
+                    message_template: route.message.clone(),
                 },
             );
+        }
+
+        let mut active_paths = HashMap::new();
+        for (source_id, (source, validated)) in &prepared_sources {
+            if source.route_ids.is_empty() {
+                continue;
+            }
+            for path in &validated.http_paths {
+                if let Some(existing) = active_paths.insert(path.clone(), source_id.clone()) {
+                    bail!(
+                        "duplicate webhook path {path:?} on sources {existing:?} and {source_id:?}"
+                    );
+                }
+            }
         }
         Ok(Runtime {
             config,
             sources: self.sources.clone(),
             destinations: self.destinations.clone(),
+            prepared_sources: prepared_sources
+                .into_iter()
+                .filter_map(|(id, (source, _))| {
+                    (!source.route_ids.is_empty()).then_some((id, source))
+                })
+                .collect(),
+            prepared_destinations,
             routes: Arc::new(routes),
             ready: Arc::new(AtomicBool::new(false)),
         })
@@ -248,6 +305,8 @@ pub struct Runtime {
     config: Config,
     sources: HashMap<String, Arc<dyn SourcePlugin>>,
     destinations: HashMap<String, Arc<dyn DestinationPlugin>>,
+    prepared_sources: HashMap<String, PreparedSource>,
+    prepared_destinations: HashMap<String, PreparedDestination>,
     routes: Arc<HashMap<String, PreparedRoute>>,
     ready: Arc<AtomicBool>,
 }
@@ -262,26 +321,22 @@ impl Runtime {
         };
 
         let mut app = Router::new();
-        for (name, plugin) in &self.sources {
-            let routes = self
-                .routes
-                .iter()
-                .filter(|(_, route)| route.source_plugin == *name)
-                .map(|(route_id, route)| SourceRoute {
-                    route_id: route_id.clone(),
-                    spec: route.source_spec.clone(),
-                    watch_key: route.source_watch_key.clone(),
-                })
-                .collect();
+        for (source_id, source) in &self.prepared_sources {
+            let plugin = self
+                .sources
+                .get(&source.plugin)
+                .expect("prepared source plugin must be registered");
             let context = SourceContext {
+                source_id: source_id.clone(),
                 public_base_url: self.config.server.public_base_url.clone(),
-                routes,
+                spec: source.spec.clone(),
+                route_ids: source.route_ids.clone(),
                 sink: sink.clone(),
             };
             plugin
                 .reconcile(&context)
                 .await
-                .with_context(|| format!("source plugin {name:?} reconciliation failed"))?;
+                .with_context(|| format!("source {source_id:?} reconciliation failed"))?;
             app = app.merge(plugin.router(context));
         }
 
@@ -313,6 +368,7 @@ impl Runtime {
                 storage.clone(),
                 self.routes.clone(),
                 self.destinations.clone(),
+                self.prepared_destinations.clone(),
                 self.config.delivery.max_attempts,
             ));
         }
@@ -332,6 +388,7 @@ async fn delivery_worker(
     storage: Storage,
     routes: Arc<HashMap<String, PreparedRoute>>,
     destinations: HashMap<String, Arc<dyn DestinationPlugin>>,
+    prepared_destinations: HashMap<String, PreparedDestination>,
     max_attempts: u32,
 ) {
     loop {
@@ -351,7 +408,15 @@ async fn delivery_worker(
             let _ = storage.dead_letter(delivery.id, delivery.attempts, "route no longer exists");
             continue;
         };
-        let Some(plugin) = destinations.get(&route.destination_plugin) else {
+        let Some(destination) = prepared_destinations.get(&route.destination_id) else {
+            let _ = storage.dead_letter(
+                delivery.id,
+                delivery.attempts,
+                "destination no longer exists",
+            );
+            continue;
+        };
+        let Some(plugin) = destinations.get(&destination.plugin) else {
             let _ = storage.dead_letter(
                 delivery.id,
                 delivery.attempts,
@@ -360,10 +425,7 @@ async fn delivery_worker(
             continue;
         };
 
-        match plugin
-            .deliver(&route.destination_spec, &delivery.message)
-            .await
-        {
+        match plugin.deliver(&destination.spec, &delivery.message).await {
             Ok(()) => {
                 if let Err(error) = storage.complete(delivery.id) {
                     error!(worker_id, %error, "failed to complete delivery");
@@ -408,10 +470,29 @@ pub fn schema_value<T: JsonSchema>() -> Value {
     serde_json::to_value(schemars::schema_for!(T)).expect("JSON Schema must serialize")
 }
 
+fn validate_http_path(path: &str) -> Result<()> {
+    if !path.starts_with('/') || path == "/" {
+        bail!("path must be an absolute non-root path beginning with '/'");
+    }
+    path.parse::<axum::http::uri::PathAndQuery>()
+        .context("path is not a valid HTTP path")?;
+    if path.ends_with('/') {
+        bail!("path must not have a trailing slash");
+    }
+    if path.contains(['?', '#', '{', '}', '*', ':']) {
+        bail!("path must be static and contain no query, fragment, capture, or wildcard");
+    }
+    if matches!(path, "/health" | "/ready") {
+        bail!("path {path:?} is reserved");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct TestSource;
 
@@ -435,8 +516,8 @@ mod tests {
 
         fn validate_spec(&self, _spec: &Value) -> Result<ValidatedSource> {
             Ok(ValidatedSource {
-                watch_key: "watch".into(),
                 allowed_template_variables: self.template_variables(),
+                http_paths: vec!["/hooks/test".into()],
             })
         }
 
@@ -465,10 +546,6 @@ mod tests {
             Ok(())
         }
 
-        fn message_template<'a>(&self, spec: &'a Value) -> Result<&'a str> {
-            spec["message"].as_str().context("message")
-        }
-
         async fn deliver(&self, _spec: &Value, _message: &str) -> Result<(), DeliveryError> {
             Ok(())
         }
@@ -484,16 +561,25 @@ mod tests {
                 sqlite_path: ":memory:".into(),
             },
             delivery: DeliveryConfig::default(),
-            routes: vec![RouteConfig {
-                id: "route".into(),
-                src: PluginConfig {
+            srcs: HashMap::from([(
+                "source".into(),
+                PluginConfig {
                     plugin: source.into(),
                     spec: json!({}),
                 },
-                dst: PluginConfig {
+            )]),
+            dsts: HashMap::from([(
+                "destination".into(),
+                PluginConfig {
                     plugin: "test-destination".into(),
-                    spec: json!({"message": "{{ event.id }}"}),
+                    spec: json!({}),
                 },
+            )]),
+            routes: vec![RouteConfig {
+                id: "route".into(),
+                src: "source".into(),
+                dst: "destination".into(),
+                message: "{{ event.id }}".into(),
             }],
         }
     }
@@ -518,5 +604,210 @@ mod tests {
             .err()
             .expect("unknown plugin must fail");
         assert!(error.to_string().contains("unknown source plugin"));
+    }
+
+    #[test]
+    fn rejects_invalid_reserved_and_duplicate_active_webhook_paths() {
+        struct PathSource(&'static str);
+
+        #[async_trait]
+        impl SourcePlugin for PathSource {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata {
+                    name: self.0,
+                    description: "test",
+                    spec_schema: json!({}),
+                }
+            }
+
+            fn template_context_schema(&self) -> Value {
+                json!({})
+            }
+
+            fn template_variables(&self) -> Vec<String> {
+                vec!["event".into()]
+            }
+
+            fn validate_spec(&self, spec: &Value) -> Result<ValidatedSource> {
+                Ok(ValidatedSource {
+                    allowed_template_variables: self.template_variables(),
+                    http_paths: vec![spec["path"].as_str().context("path")?.into()],
+                })
+            }
+
+            fn router(&self, _context: SourceContext) -> Router {
+                Router::new()
+            }
+
+            async fn reconcile(&self, _context: &SourceContext) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let builder = RuntimeBuilder::new()
+            .source(PathSource("one"))
+            .source(PathSource("two"))
+            .destination(TestDestination);
+        let mut config = test_config("one");
+        config.srcs.get_mut("source").unwrap().spec = json!({"path": "/health"});
+        let error = builder
+            .check_config(config)
+            .err()
+            .expect("reserved path must fail");
+        assert!(format!("{error:#}").contains("reserved"));
+
+        let mut config = test_config("one");
+        config.srcs.get_mut("source").unwrap().spec = json!({"path": "/hooks/shared"});
+        config.srcs.insert(
+            "other".into(),
+            PluginConfig {
+                plugin: "two".into(),
+                spec: json!({"path": "/hooks/shared"}),
+            },
+        );
+        config.routes.push(RouteConfig {
+            id: "other-route".into(),
+            src: "other".into(),
+            dst: "destination".into(),
+            message: "{{ event.id }}".into(),
+        });
+        assert!(
+            builder
+                .check_config(config)
+                .err()
+                .expect("duplicate path must fail")
+                .to_string()
+                .contains("duplicate webhook path")
+        );
+    }
+
+    #[test]
+    fn validates_unreferenced_definitions_but_only_activates_referenced_sources() {
+        let builder = RuntimeBuilder::new()
+            .source(TestSource)
+            .destination(TestDestination);
+        let mut config = test_config("test-source");
+        config.srcs.insert(
+            "unused".into(),
+            PluginConfig {
+                plugin: "missing".into(),
+                spec: json!({}),
+            },
+        );
+        assert!(
+            builder
+                .check_config(config)
+                .err()
+                .expect("unknown unreferenced plugin must fail")
+                .to_string()
+                .contains("unknown source plugin")
+        );
+    }
+
+    #[test]
+    fn validates_reused_definitions_once_and_supports_route_local_templates() {
+        static SOURCE_VALIDATIONS: AtomicUsize = AtomicUsize::new(0);
+        static DESTINATION_VALIDATIONS: AtomicUsize = AtomicUsize::new(0);
+
+        struct CountingSource;
+
+        #[async_trait]
+        impl SourcePlugin for CountingSource {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata {
+                    name: "counting-source",
+                    description: "test",
+                    spec_schema: json!({}),
+                }
+            }
+
+            fn template_context_schema(&self) -> Value {
+                json!({})
+            }
+
+            fn template_variables(&self) -> Vec<String> {
+                vec!["event".into()]
+            }
+
+            fn validate_spec(&self, _spec: &Value) -> Result<ValidatedSource> {
+                SOURCE_VALIDATIONS.fetch_add(1, Ordering::Relaxed);
+                Ok(ValidatedSource {
+                    allowed_template_variables: self.template_variables(),
+                    http_paths: vec!["/hooks/counting".into()],
+                })
+            }
+
+            fn router(&self, _context: SourceContext) -> Router {
+                Router::new()
+            }
+
+            async fn reconcile(&self, _context: &SourceContext) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        struct CountingDestination;
+
+        #[async_trait]
+        impl DestinationPlugin for CountingDestination {
+            fn metadata(&self) -> PluginMetadata {
+                PluginMetadata {
+                    name: "counting-destination",
+                    description: "test",
+                    spec_schema: json!({}),
+                }
+            }
+
+            fn validate_spec(&self, _spec: &Value) -> Result<()> {
+                DESTINATION_VALIDATIONS.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+
+            async fn deliver(&self, _spec: &Value, _message: &str) -> Result<(), DeliveryError> {
+                Ok(())
+            }
+        }
+
+        SOURCE_VALIDATIONS.store(0, Ordering::Relaxed);
+        DESTINATION_VALIDATIONS.store(0, Ordering::Relaxed);
+        let mut config = test_config("counting-source");
+        config.dsts.get_mut("destination").unwrap().plugin = "counting-destination".into();
+        config.routes.push(RouteConfig {
+            id: "second".into(),
+            src: "source".into(),
+            dst: "destination".into(),
+            message: "second: {{ event.id }}".into(),
+        });
+        let runtime = RuntimeBuilder::new()
+            .source(CountingSource)
+            .destination(CountingDestination)
+            .check_config(config)
+            .unwrap();
+
+        assert_eq!(SOURCE_VALIDATIONS.load(Ordering::Relaxed), 1);
+        assert_eq!(DESTINATION_VALIDATIONS.load(Ordering::Relaxed), 1);
+        assert_eq!(runtime.prepared_sources["source"].route_ids.len(), 2);
+        assert_ne!(
+            runtime.routes["route"].message_template,
+            runtime.routes["second"].message_template
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_http_paths() {
+        for path in [
+            "",
+            "relative",
+            "/",
+            "/trailing/",
+            "/query?x=1",
+            "/fragment#x",
+            "/capture/{id}",
+            "/wildcard/*rest",
+            "/invalid path",
+        ] {
+            assert!(validate_http_path(path).is_err(), "{path:?} must fail");
+        }
+        validate_http_path("/hooks/static-path").unwrap();
     }
 }

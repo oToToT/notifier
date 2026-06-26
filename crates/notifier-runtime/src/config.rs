@@ -1,4 +1,9 @@
-use std::{collections::HashSet, fs, net::SocketAddr, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    net::SocketAddr,
+    path::Path,
+};
 
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
@@ -13,6 +18,8 @@ pub struct Config {
     pub storage: StorageConfig,
     #[serde(default)]
     pub delivery: DeliveryConfig,
+    pub srcs: HashMap<String, PluginConfig>,
+    pub dsts: HashMap<String, PluginConfig>,
     pub routes: Vec<RouteConfig>,
 }
 
@@ -49,8 +56,9 @@ impl Default for DeliveryConfig {
 #[serde(deny_unknown_fields)]
 pub struct RouteConfig {
     pub id: String,
-    pub src: PluginConfig,
-    pub dst: PluginConfig,
+    pub src: String,
+    pub dst: String,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -95,6 +103,39 @@ impl Config {
             if !ids.insert(&route.id) {
                 bail!("duplicate route ID {:?}", route.id);
             }
+            if route.src.trim().is_empty() {
+                bail!("route {:?} source reference cannot be empty", route.id);
+            }
+            if route.dst.trim().is_empty() {
+                bail!("route {:?} destination reference cannot be empty", route.id);
+            }
+            if !self.srcs.contains_key(&route.src) {
+                bail!(
+                    "route {:?} references missing source {:?}",
+                    route.id,
+                    route.src
+                );
+            }
+            if !self.dsts.contains_key(&route.dst) {
+                bail!(
+                    "route {:?} references missing destination {:?}",
+                    route.id,
+                    route.dst
+                );
+            }
+            if route.message.trim().is_empty() {
+                bail!("route {:?} message cannot be empty", route.id);
+            }
+        }
+        for id in self.srcs.keys() {
+            if id.trim().is_empty() {
+                bail!("source IDs cannot be empty");
+            }
+        }
+        for id in self.dsts.keys() {
+            if id.trim().is_empty() {
+                bail!("destination IDs cannot be empty");
+            }
         }
         Ok(())
     }
@@ -103,14 +144,14 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
-    #[test]
-    fn rejects_duplicate_route_ids() {
+    fn config() -> Config {
         let plugin = PluginConfig {
             plugin: "x".into(),
             spec: Value::Null,
         };
-        let config = Config {
+        Config {
             server: ServerConfig {
                 bind: "127.0.0.1:8080".parse().unwrap(),
                 public_base_url: "https://example.test".parse().unwrap(),
@@ -119,25 +160,51 @@ mod tests {
                 sqlite_path: ":memory:".into(),
             },
             delivery: DeliveryConfig::default(),
-            routes: vec![
-                RouteConfig {
-                    id: "same".into(),
-                    src: plugin.clone(),
-                    dst: plugin.clone(),
-                },
-                RouteConfig {
-                    id: "same".into(),
-                    src: plugin.clone(),
-                    dst: plugin,
-                },
-            ],
-        };
+            srcs: HashMap::from([("source".into(), plugin.clone())]),
+            dsts: HashMap::from([("destination".into(), plugin)]),
+            routes: vec![RouteConfig {
+                id: "route".into(),
+                src: "source".into(),
+                dst: "destination".into(),
+                message: "test".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_route_ids() {
+        let mut config = config();
+        config.routes.push(RouteConfig {
+            id: "route".into(),
+            src: "source".into(),
+            dst: "destination".into(),
+            message: "test".into(),
+        });
         assert!(
             config
                 .validate_base()
                 .unwrap_err()
                 .to_string()
                 .contains("duplicate")
+        );
+    }
+
+    #[test]
+    fn rejects_empty_ids_and_missing_references() {
+        let mut value = serde_json::to_value(config()).unwrap();
+        value["srcs"] = json!({"": {"plugin": "x", "spec": null}});
+        value["routes"][0]["src"] = json!("");
+        let invalid: Config = serde_json::from_value(value).unwrap();
+        assert!(invalid.validate_base().is_err());
+
+        let mut config = config();
+        config.routes[0].dst = "missing".into();
+        assert!(
+            config
+                .validate_base()
+                .unwrap_err()
+                .to_string()
+                .contains("missing destination")
         );
     }
 }

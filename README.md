@@ -20,8 +20,9 @@ Provider protocol bindings are supplied by `twitch_api`, `twitcasting`, `serenit
 `teloxide`; the plugin crates contain routing and policy logic rather than independent API
 clients.
 
-Each route has one source and one destination. Create multiple routes to fan one source
-out to multiple destinations. Internally, identical source watches are reconciled only once.
+Sources and destinations are keyed reusable definitions. Routes reference those IDs and own
+their message templates. Multiple routes can reuse either side; each referenced source is
+reconciled once.
 
 ## Commands
 
@@ -36,19 +37,19 @@ restart. Route IDs must be unique and should remain stable across restarts.
 
 The server exposes:
 
-- `POST /webhooks/twitch`
-- `POST /webhooks/twitcasting`
+- One configured `POST` path per active Twitch or TwitCasting source
 - `GET /health`
 - `GET /ready`
 
 Readiness is enabled only after all configured source subscriptions reconcile successfully.
 Reconciliation creates missing subscriptions; it does not delete provider subscriptions that
-are absent from the file. The TwitCasting application's callback URL must already point to
-`/webhooks/twitcasting`.
+are absent from the file. Twitch callback URLs are built from `public_base_url` and the
+source's `webhook_path`. The TwitCasting application's callback URL must be configured
+separately to the same full URL.
 
 ## Templates
 
-Destination `message` fields are MiniJinja templates. Interpolation, conditionals, loops,
+Route `message` fields are MiniJinja templates. Interpolation, conditionals, loops,
 and built-in filters are available. Missing event values render as empty strings. Syntax and
 detectable unknown top-level variables are rejected at startup. Run the `schema` command for
 the complete plugin schemas and template-variable documentation.
@@ -71,9 +72,9 @@ Delivery is at least once. If a destination accepts a request but its response i
 retry can produce a duplicate. Webhook deduplication uses Twitch message IDs and a stable
 TwitCasting key derived from the broadcaster and movie.
 
-Credentials are literal route-local JSON values. The service never logs route specs or
-credentials; protect the configuration file and SQLite database using operating-system
-permissions.
+Credentials are literal values in reusable source and destination definitions. The service
+never logs specs or credentials; protect the configuration file and SQLite database using
+operating-system permissions.
 
 ## Development
 

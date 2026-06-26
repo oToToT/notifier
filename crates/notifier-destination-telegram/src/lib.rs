@@ -26,7 +26,6 @@ impl Default for TelegramDestination {
 struct Spec {
     bot_token: String,
     chat_id: String,
-    message: String,
 }
 
 fn parse_spec(value: &Value) -> Result<Spec> {
@@ -40,9 +39,6 @@ fn parse_spec(value: &Value) -> Result<Spec> {
     spec.chat_id
         .parse::<i64>()
         .context("chat_id must be a signed integer")?;
-    if spec.message.trim().is_empty() {
-        anyhow::bail!("message cannot be empty");
-    }
     Ok(spec)
 }
 
@@ -58,12 +54,6 @@ impl DestinationPlugin for TelegramDestination {
 
     fn validate_spec(&self, spec: &Value) -> Result<()> {
         parse_spec(spec).map(|_| ())
-    }
-
-    fn message_template<'a>(&self, spec: &'a Value) -> Result<&'a str> {
-        spec.get("message")
-            .and_then(Value::as_str)
-            .context("message must be a string")
     }
 
     async fn deliver(&self, spec: &Value, message: &str) -> Result<(), DeliveryError> {

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use axum::{
@@ -17,7 +15,6 @@ use notifier_runtime::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use twitch_api::{
     TwitchClient,
     eventsub::{Event, EventType, Transport, stream::StreamOnlineV1},
@@ -47,6 +44,7 @@ impl Default for TwitchSource {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Spec {
+    webhook_path: String,
     client_id: String,
     client_secret: String,
     webhook_secret: String,
@@ -132,17 +130,6 @@ fn parse_spec(value: &Value) -> Result<Spec> {
     Ok(spec)
 }
 
-fn watch_key(spec: &Spec) -> String {
-    let material = format!(
-        "{}\0{}\0{}\0{}",
-        spec.client_id,
-        spec.client_secret,
-        spec.webhook_secret,
-        spec.broadcaster.to_ascii_lowercase()
-    );
-    hex::encode(Sha256::digest(material.as_bytes()))
-}
-
 #[async_trait]
 impl SourcePlugin for TwitchSource {
     fn metadata(&self) -> PluginMetadata {
@@ -164,14 +151,15 @@ impl SourcePlugin for TwitchSource {
     fn validate_spec(&self, spec: &Value) -> Result<ValidatedSource> {
         let spec = parse_spec(spec)?;
         Ok(ValidatedSource {
-            watch_key: watch_key(&spec),
             allowed_template_variables: self.template_variables(),
+            http_paths: vec![spec.webhook_path],
         })
     }
 
     fn router(&self, context: SourceContext) -> Router {
+        let spec = parse_spec(&context.spec).expect("validated Twitch spec");
         Router::new()
-            .route("/webhooks/twitch", post(webhook))
+            .route(&spec.webhook_path, post(webhook))
             .with_state(WebhookState {
                 client: self.client.clone(),
                 context,
@@ -179,45 +167,38 @@ impl SourcePlugin for TwitchSource {
     }
 
     async fn reconcile(&self, context: &SourceContext) -> Result<()> {
+        let spec = parse_spec(&context.spec)?;
         let callback = context
             .public_base_url
-            .join("/webhooks/twitch")?
+            .join(&spec.webhook_path)?
             .to_string();
-        let mut unique = HashMap::new();
-        for route in &context.routes {
-            unique
-                .entry(route.watch_key.clone())
-                .or_insert(parse_spec(&route.spec)?);
-        }
-        for spec in unique.values() {
-            let token = token(&self.client, spec).await?;
-            let broadcaster = resolve_user(&self.client, spec, &token).await?;
-            let pages = self
-                .client
+        let token = token(&self.client, &spec).await?;
+        let broadcaster = resolve_user(&self.client, &spec, &token).await?;
+        let pages = self
+            .client
+            .helix
+            .get_eventsub_subscriptions(None, Some(EventType::StreamOnline), None, &token)
+            .try_collect::<Vec<_>>()
+            .await?;
+        let exists = pages
+            .iter()
+            .flat_map(|page| &page.subscriptions)
+            .any(|subscription| {
+                subscription.condition["broadcaster_user_id"] == broadcaster.id.as_str()
+                    && subscription
+                        .transport
+                        .as_webhook()
+                        .is_some_and(|transport| transport.callback == callback)
+            });
+        if !exists {
+            self.client
                 .helix
-                .get_eventsub_subscriptions(None, Some(EventType::StreamOnline), None, &token)
-                .try_collect::<Vec<_>>()
+                .create_eventsub_subscription(
+                    StreamOnlineV1::broadcaster_user_id(broadcaster.id),
+                    Transport::webhook(&callback, spec.webhook_secret),
+                    &token,
+                )
                 .await?;
-            let exists = pages
-                .iter()
-                .flat_map(|page| &page.subscriptions)
-                .any(|subscription| {
-                    subscription.condition["broadcaster_user_id"] == broadcaster.id.as_str()
-                        && subscription
-                            .transport
-                            .as_webhook()
-                            .is_some_and(|transport| transport.callback == callback)
-                });
-            if !exists {
-                self.client
-                    .helix
-                    .create_eventsub_subscription(
-                        StreamOnlineV1::broadcaster_user_id(broadcaster.id),
-                        Transport::webhook(&callback, spec.webhook_secret.clone()),
-                        &token,
-                    )
-                    .await?;
-            }
         }
         Ok(())
     }
@@ -241,17 +222,8 @@ async fn handle_webhook(
     let message_type = header(headers, "twitch-eventsub-message-type")?;
     let parsed: WebhookBody = serde_json::from_slice(body).context("invalid webhook JSON")?;
 
-    let matching_specs: Vec<(String, Spec)> = state
-        .context
-        .routes
-        .iter()
-        .filter_map(|route| {
-            let spec = parse_spec(&route.spec).ok()?;
-            verify_signature(&spec.webhook_secret, message_id, timestamp, body, signature)
-                .then(|| (route.route_id.clone(), spec))
-        })
-        .collect();
-    if matching_specs.is_empty() {
+    let spec = parse_spec(&state.context.spec)?;
+    if !verify_signature(&spec.webhook_secret, message_id, timestamp, body, signature) {
         return Ok(StatusCode::UNAUTHORIZED.into_response());
     }
 
@@ -266,21 +238,16 @@ async fn handle_webhook(
                 return Ok(StatusCode::NO_CONTENT.into_response());
             }
             let event = parsed.event.context("event is missing")?;
-            let selected: Vec<(String, Spec)> = matching_specs
-                .into_iter()
-                .filter(|(_, spec)| {
-                    spec.broadcaster
-                        .eq_ignore_ascii_case(&event.broadcaster_user_login)
-                })
-                .collect();
-            if selected.is_empty() {
+            if !spec
+                .broadcaster
+                .eq_ignore_ascii_case(&event.broadcaster_user_login)
+            {
                 return Ok(StatusCode::NO_CONTENT.into_response());
             }
-            let spec = &selected[0].1;
-            let access_token = token(&state.client, spec).await?;
+            let access_token = token(&state.client, &spec).await?;
             let stream = get_stream(
                 &state.client,
-                spec,
+                &spec,
                 &access_token,
                 &event.broadcaster_user_id,
             )
@@ -301,14 +268,12 @@ async fn handle_webhook(
                     "url": format!("https://www.twitch.tv/{}", stream.user_login),
                 }
             });
-            let route_ids = selected
-                .into_iter()
-                .map(|(route_id, _)| route_id)
-                .collect::<Vec<_>>();
-            state
-                .context
-                .sink
-                .ingest("twitch", &route_ids, message_id, &context)?;
+            state.context.sink.ingest(
+                &state.context.source_id,
+                &state.context.route_ids,
+                message_id,
+                &context,
+            )?;
             Ok(StatusCode::NO_CONTENT.into_response())
         }
         _ => Ok(StatusCode::BAD_REQUEST.into_response()),
@@ -387,6 +352,7 @@ async fn get_stream(
 mod tests {
     use super::*;
     use hmac::{Hmac, Mac};
+    use sha2::Sha256;
 
     #[test]
     fn verifies_hmac_and_rejects_changes() {
@@ -404,14 +370,17 @@ mod tests {
     }
 
     #[test]
-    fn groups_identical_watches_without_exposing_credentials() {
+    fn validates_configured_webhook_path() {
         let spec = Spec {
+            webhook_path: "/hooks/twitch".into(),
             client_id: "id".into(),
             client_secret: "secret".into(),
             webhook_secret: "0123456789".into(),
             broadcaster: "Example".into(),
         };
-        assert_eq!(watch_key(&spec), watch_key(&spec));
-        assert!(!watch_key(&spec).contains("secret"));
+        let validated = TwitchSource::new()
+            .validate_spec(&serde_json::to_value(spec).unwrap())
+            .unwrap();
+        assert_eq!(validated.http_paths, ["/hooks/twitch"]);
     }
 }

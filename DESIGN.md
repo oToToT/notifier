@@ -40,17 +40,16 @@ Plugin names must be unique within their category.
 
 `SourcePlugin` provides:
 
-- Plugin metadata and a JSON Schema for its route-local specification.
+- Plugin metadata and a JSON Schema for its reusable source specification.
 - A schema and documented top-level variables for its template context.
-- Startup validation and a stable watch key.
-- Axum webhook routes.
+- Startup validation, including the HTTP paths it exposes.
+- An Axum webhook router for one source definition.
 - Startup reconciliation of external provider subscriptions.
 
 `DestinationPlugin` provides:
 
-- Plugin metadata and a JSON Schema for its route-local specification.
+- Plugin metadata and a JSON Schema for its reusable destination specification.
 - Startup validation.
-- Access to the destination-owned `message` template.
 - Asynchronous delivery with transient or permanent error classification.
 
 `EventSink` is passed to source plugins. It renders destination templates and transactionally
@@ -76,38 +75,45 @@ Notifier reads one JSON file at startup:
     "workers": 4,
     "max_attempts": 8
   },
+  "srcs": {
+    "twitch-example": {
+      "plugin": "twitch",
+      "spec": {
+        "webhook_path": "/hooks/twitch-example",
+        "client_id": "...",
+        "client_secret": "...",
+        "webhook_secret": "...",
+        "broadcaster": "example"
+      }
+    }
+  },
+  "dsts": {
+    "discord-main": {
+      "plugin": "discord",
+      "spec": {
+        "bot_token": "...",
+        "channel_id": "123"
+      }
+    }
+  },
   "routes": [
     {
       "id": "twitch-example-to-discord",
-      "src": {
-        "plugin": "twitch",
-        "spec": {
-          "client_id": "...",
-          "client_secret": "...",
-          "webhook_secret": "...",
-          "broadcaster": "example"
-        }
-      },
-      "dst": {
-        "plugin": "discord",
-        "spec": {
-          "bot_token": "...",
-          "channel_id": "123",
-          "message": "{{ broadcaster.name }} is live: {{ stream.title }}\n{{ stream.url }}"
-        }
-      }
+      "src": "twitch-example",
+      "dst": "discord-main",
+      "message": "{{ broadcaster.name }} is live: {{ stream.title }}\n{{ stream.url }}"
     }
   ]
 }
 ```
 
-Each route has exactly one source and one destination. Fan-out is represented by multiple
-routes with equivalent source specifications. Identical source watches are grouped by a
-credential-sensitive hash so the provider subscription is reconciled only once without
-exposing credentials.
+`srcs` and `dsts` are keyed reusable definitions. Each route references one of each and owns
+its template. A source ID can fan out to many routes and is reconciled once. A destination ID
+can be reused with different route templates. All definitions are validated at startup;
+unreferenced definitions remain inactive.
 
 Route IDs must be unique and stable. Configuration changes require a restart. Credentials
-remain literal, route-local values and are never included in application logs.
+remain literal values in definitions and are never included in application logs.
 
 ## CLI
 
@@ -122,7 +128,7 @@ remain literal, route-local values and are never included in application logs.
 
 ## Templates
 
-Destination plugins own the `message` field. Templates use a restricted MiniJinja environment
+Routes own the `message` field. Templates use a restricted MiniJinja environment
 with interpolation, conditionals, loops, and built-in filters.
 
 Startup validation rejects:
@@ -153,10 +159,12 @@ TwitCasting exposes:
 
 The runtime exposes:
 
-- `POST /webhooks/twitch`
-- `POST /webhooks/twitcasting`
+- One configured `POST` webhook path for every active HTTP source ID
 - `GET /health`
 - `GET /ready`
+
+Webhook paths must be unique static absolute paths. Queries, fragments, captures, wildcards,
+trailing slashes, `/health`, and `/ready` are rejected before routers are constructed.
 
 `/health` reports that the process and HTTP server are alive. `/ready` becomes successful
 only after SQLite recovery and all source reconciliation work succeeds.
@@ -174,17 +182,17 @@ The Twitch plugin uses `twitch_api` for:
 - Stream enrichment.
 - EventSub HMAC verification.
 
-At startup, each unique watch resolves the broadcaster ID and creates a missing
-`stream.online` webhook subscription for the runtime callback URL. Existing external
+At startup, each active source ID resolves the broadcaster ID and creates a missing
+`stream.online` webhook subscription for `public_base_url + webhook_path`. Existing external
 subscriptions not represented in configuration are not deleted.
 
 Webhook handling:
 
 1. Read Twitch message headers and the raw body.
-2. Verify the HMAC using the matching route secret.
+2. Verify the HMAC using that source definition's secret.
 3. Return the raw challenge for callback verification.
 4. Acknowledge revocations.
-5. For notifications, match routes by broadcaster.
+5. Match the notification broadcaster to that source definition.
 6. Query current stream data for title and URL.
 7. Persist rendered deliveries using the Twitch message ID as the deduplication key.
 8. Return a successful response only after persistence completes.
@@ -199,9 +207,10 @@ The TwitCasting plugin uses `twitcasting` for:
 - Webhook listing and registration.
 - Typed webhook decoding.
 
-At startup, each unique watch resolves the broadcaster ID and registers a missing
-`livestart` hook. The application-level callback URL must already be configured to target
-`/webhooks/twitcasting`. Unconfigured external hooks are not removed.
+At startup, each active source ID resolves the broadcaster ID and registers a missing
+`livestart` hook. The application-level callback URL must already be configured to the full
+URL corresponding to that source's `webhook_path`. Unconfigured external hooks are not
+removed.
 
 TwitCasting provides an opaque signature in the webhook body rather than a documented HMAC
 algorithm. The plugin compares it with the configured application signature and matches the
@@ -289,25 +298,23 @@ response is lost, retrying can produce a duplicate.
 
 ## Logging and Security
 
-Complete route specifications and credentials must never be logged. Errors identify plugins,
+Complete source or destination specifications and credentials must never be logged. Errors identify plugins,
 routes, attempts, and provider classifications without including tokens or secrets.
 
 Configuration files and SQLite databases contain sensitive material and must be protected
 with operating-system permissions.
 
-Twitch watch keys and TwitCasting watch keys hash credentials and broadcaster identity. They
-are used only for internal grouping and are not authentication primitives.
-
 ## Testing and Quality Gates
 
 Coverage includes:
 
-- Base configuration validation and duplicate route IDs.
+- Keyed definition, reference, plugin, specification, route ID, and template validation.
+- Required, malformed, reserved, and duplicate webhook path validation.
 - Plugin lookup and schema generation.
 - Template syntax, unknown variables, missing values, and loop-local variables.
 - SQLite deduplication, claiming, recovery, and dead-letter transitions.
-- Twitch HMAC verification and watch grouping.
-- TwitCasting watch grouping.
+- Twitch HMAC verification and configurable callback routing.
+- TwitCasting configurable callback routing and source-scoped matching.
 - Discord and Telegram error classification.
 - CLI example configuration validation and schema output.
 

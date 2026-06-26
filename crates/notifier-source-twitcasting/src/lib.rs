@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use axum::{
@@ -41,6 +39,7 @@ impl Default for TwitCastingSource {
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Spec {
+    webhook_path: String,
     client_id: String,
     client_secret: String,
     webhook_signature: String,
@@ -102,17 +101,6 @@ fn parse_spec(value: &Value) -> Result<Spec> {
     Ok(spec)
 }
 
-fn watch_key(spec: &Spec) -> String {
-    let material = format!(
-        "{}\0{}\0{}\0{}",
-        spec.client_id,
-        spec.client_secret,
-        spec.webhook_signature,
-        spec.broadcaster.to_ascii_lowercase()
-    );
-    format!("{:x}", Sha256::digest(material.as_bytes()))
-}
-
 #[async_trait]
 impl SourcePlugin for TwitCastingSource {
     fn metadata(&self) -> PluginMetadata {
@@ -134,34 +122,28 @@ impl SourcePlugin for TwitCastingSource {
     fn validate_spec(&self, spec: &Value) -> Result<ValidatedSource> {
         let spec = parse_spec(spec)?;
         Ok(ValidatedSource {
-            watch_key: watch_key(&spec),
             allowed_template_variables: self.template_variables(),
+            http_paths: vec![spec.webhook_path],
         })
     }
 
     fn router(&self, context: SourceContext) -> Router {
+        let spec = parse_spec(&context.spec).expect("validated TwitCasting spec");
         Router::new()
-            .route("/webhooks/twitcasting", post(webhook))
+            .route(&spec.webhook_path, post(webhook))
             .with_state(WebhookState { context })
     }
 
     async fn reconcile(&self, context: &SourceContext) -> Result<()> {
-        let mut unique = HashMap::new();
-        for route in &context.routes {
-            unique
-                .entry(route.watch_key.clone())
-                .or_insert(parse_spec(&route.spec)?);
-        }
-        for spec in unique.values() {
-            let user_id = resolve_user(spec).await?;
-            let hooks = list_webhooks(spec).await?;
-            let exists = hooks
-                .webhooks
-                .iter()
-                .any(|hook| hook.user_id == user_id && hook.event == WebhookEvent::LiveStart);
-            if !exists {
-                create_webhook(spec, &user_id).await?;
-            }
+        let spec = parse_spec(&context.spec)?;
+        let user_id = resolve_user(&spec).await?;
+        let hooks = list_webhooks(&spec).await?;
+        let exists = hooks
+            .webhooks
+            .iter()
+            .any(|hook| hook.user_id == user_id && hook.event == WebhookEvent::LiveStart);
+        if !exists {
+            create_webhook(&spec, &user_id).await?;
         }
         Ok(())
     }
@@ -186,20 +168,12 @@ fn handle_webhook(state: &WebhookState, body: WebhookPayload) -> Result<()> {
     else {
         return Ok(());
     };
-    let selected = state
-        .context
-        .routes
-        .iter()
-        .filter_map(|route| {
-            let spec = parse_spec(&route.spec).ok()?;
-            (spec.webhook_signature == signature.expose_secret()
-                && spec
-                    .broadcaster
-                    .eq_ignore_ascii_case(broadcaster.screen_id.as_str()))
-            .then(|| route.route_id.clone())
-        })
-        .collect::<Vec<_>>();
-    if selected.is_empty() {
+    let spec = parse_spec(&state.context.spec)?;
+    if spec.webhook_signature != signature.expose_secret()
+        || !spec
+            .broadcaster
+            .eq_ignore_ascii_case(broadcaster.screen_id.as_str())
+    {
         bail!("signature or broadcaster did not match");
     }
     if movie.user_id != broadcaster.id {
@@ -229,10 +203,12 @@ fn handle_webhook(state: &WebhookState, body: WebhookPayload) -> Result<()> {
             "url": movie.link,
         }
     });
-    state
-        .context
-        .sink
-        .ingest("twitcasting", &selected, &dedupe_key, &context)?;
+    state.context.sink.ingest(
+        &state.context.source_id,
+        &state.context.route_ids,
+        &dedupe_key,
+        &context,
+    )?;
     Ok(())
 }
 
@@ -275,15 +251,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stable_watch_key_does_not_include_credentials() {
+    fn validates_configured_webhook_path() {
         let spec = Spec {
+            webhook_path: "/hooks/twitcasting".into(),
             client_id: "client".into(),
             client_secret: "secret".into(),
             webhook_signature: "signature".into(),
             broadcaster: "example".into(),
             api_base_url: default_api_base_url(),
         };
-        assert_eq!(watch_key(&spec), watch_key(&spec));
-        assert!(!watch_key(&spec).contains("secret"));
+        let validated = TwitCastingSource::new()
+            .validate_spec(&serde_json::to_value(spec).unwrap())
+            .unwrap();
+        assert_eq!(validated.http_paths, ["/hooks/twitcasting"]);
     }
 }
