@@ -8,6 +8,7 @@ use notifier_runtime::{Config, RuntimeBuilder};
 use notifier_source_nitter::NitterSource;
 use notifier_source_twitcasting::TwitCastingSource;
 use notifier_source_twitch::TwitchSource;
+use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -42,24 +43,36 @@ fn builder() -> RuntimeBuilder {
         .destination(TelegramDestination::new())
 }
 
+fn init_logging(log_level: Option<&str>) -> Result<()> {
+    let filter = match EnvFilter::try_from_default_env() {
+        Ok(filter) => filter,
+        Err(_) => {
+            let level = log_level.unwrap_or("info");
+            EnvFilter::try_new(level)
+                .with_context(|| format!("invalid server.log_level directive {level:?}"))?
+        }
+    };
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let cli = Cli::parse();
     let builder = builder();
     match cli.command {
         Command::CheckConfig { config } => {
             let config = Config::load(&config)?;
+            init_logging(config.server.log_level.as_deref())?;
+            debug!(path = %config.server.public_base_url, "checking notifier configuration");
             builder.check_config(config)?;
+            info!("configuration is valid");
             println!("configuration is valid");
             Ok(())
         }
         Command::Schema => {
+            init_logging(None)?;
+            debug!("printing notifier schema");
             println!(
                 "{}",
                 serde_json::to_string_pretty(&builder.schema())
@@ -69,6 +82,12 @@ async fn main() -> Result<()> {
         }
         Command::Serve { config } => {
             let config = Config::load(&config)?;
+            init_logging(config.server.log_level.as_deref())?;
+            info!(
+                bind = %config.server.bind,
+                public_base_url = %config.server.public_base_url,
+                "starting notifier server"
+            );
             builder.check_config(config)?.serve().await
         }
     }

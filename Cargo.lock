@@ -1546,6 +1546,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serenity",
+ "tracing",
 ]
 
 [[package]]
@@ -1559,6 +1560,7 @@ dependencies = [
  "serde",
  "serde_json",
  "teloxide",
+ "tracing",
 ]
 
 [[package]]
@@ -1597,6 +1599,7 @@ dependencies = [
  "notifier-source-twitch",
  "serde_json",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 
@@ -1634,6 +1637,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tower 0.5.2",
+ "tracing",
  "twitcasting",
  "url",
 ]
@@ -1657,6 +1661,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tower 0.5.2",
+ "tracing",
  "twitch_api",
  "url",
 ]

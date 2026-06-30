@@ -16,6 +16,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use tracing::{debug, info, warn};
 use twitch_api::{
     TwitchClient,
     eventsub::{Event, EventType, Transport, stream::StreamOnlineV1},
@@ -213,7 +214,13 @@ impl SourcePlugin for TwitchSource {
 
     fn validate_spec(&self, spec: &Value, inputs: &[RoutePluginInput]) -> Result<ValidatedSource> {
         let spec = parse_spec(spec)?;
-        configured_broadcasters(inputs)?;
+        let broadcasters = configured_broadcasters(inputs)?;
+        debug!(
+            broadcaster_count = broadcasters.len(),
+            route_count = inputs.len(),
+            webhook_path = %spec.webhook_path,
+            "validated Twitch source configuration"
+        );
         Ok(ValidatedSource {
             allowed_template_variables: self.template_variables(),
             http_paths: vec![spec.webhook_path],
@@ -236,6 +243,11 @@ impl SourcePlugin for TwitchSource {
             .public_base_url
             .join(&spec.webhook_path)?
             .to_string();
+        info!(
+            source_id = %context.source_id,
+            callback,
+            "reconciling Twitch EventSub subscriptions"
+        );
         let token = token(&self.client, &spec).await?;
         let broadcasters = configured_broadcasters(&context.route_inputs)?;
         let pages = self
@@ -257,6 +269,12 @@ impl SourcePlugin for TwitchSource {
                             .is_some_and(|transport| transport.callback == callback)
                 });
             if !exists {
+                info!(
+                    source_id = %context.source_id,
+                    broadcaster_login,
+                    broadcaster_id = %broadcaster.id,
+                    "creating Twitch EventSub subscription"
+                );
                 self.client
                     .helix
                     .create_eventsub_subscription(
@@ -265,16 +283,37 @@ impl SourcePlugin for TwitchSource {
                         &token,
                     )
                     .await?;
+            } else {
+                debug!(
+                    source_id = %context.source_id,
+                    broadcaster_login,
+                    broadcaster_id = %broadcaster.id,
+                    "Twitch EventSub subscription already exists"
+                );
             }
         }
+        info!(source_id = %context.source_id, "Twitch reconciliation completed");
         Ok(())
     }
 }
 
 async fn webhook(State(state): State<WebhookState>, headers: HeaderMap, body: Bytes) -> Response {
+    debug!(
+        source_id = %state.context.source_id,
+        body_bytes = body.len(),
+        "received Twitch webhook"
+    );
     match handle_webhook(&state, &headers, &body).await {
         Ok(response) => response,
-        Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        Err(error) => {
+            warn!(
+                source_id = %state.context.source_id,
+                body_bytes = body.len(),
+                error = %error,
+                "rejected Twitch webhook"
+            );
+            (StatusCode::BAD_REQUEST, error.to_string()).into_response()
+        }
     }
 }
 
@@ -291,23 +330,56 @@ async fn handle_webhook(
 
     let spec = parse_spec(&state.context.spec)?;
     if !verify_signature(&spec.webhook_secret, message_id, timestamp, body, signature) {
+        warn!(
+            source_id = %state.context.source_id,
+            message_id,
+            message_type,
+            "rejected Twitch webhook with invalid signature"
+        );
         return Ok(StatusCode::UNAUTHORIZED.into_response());
     }
 
     match message_type {
         "webhook_callback_verification" => {
             let challenge = parsed.challenge.context("challenge is missing")?;
+            info!(
+                source_id = %state.context.source_id,
+                message_id,
+                "accepted Twitch webhook verification challenge"
+            );
             Ok((StatusCode::OK, challenge).into_response())
         }
-        "revocation" => Ok(StatusCode::OK.into_response()),
+        "revocation" => {
+            warn!(
+                source_id = %state.context.source_id,
+                message_id,
+                subscription_type = %parsed.subscription.kind,
+                "received Twitch subscription revocation"
+            );
+            Ok(StatusCode::OK.into_response())
+        }
         "notification" => {
             if parsed.subscription.kind != "stream.online" {
+                debug!(
+                    source_id = %state.context.source_id,
+                    message_id,
+                    subscription_type = %parsed.subscription.kind,
+                    "ignored unsupported Twitch notification"
+                );
                 return Ok(StatusCode::NO_CONTENT.into_response());
             }
             let event = parsed.event.context("event is missing")?;
             let route_ids =
                 matching_route_ids(&state.context.route_inputs, &event.broadcaster_user_login)?;
             if route_ids.is_empty() {
+                warn!(
+                    source_id = %state.context.source_id,
+                    message_id,
+                    broadcaster_login = %event.broadcaster_user_login,
+                    broadcaster_id = %event.broadcaster_user_id,
+                    configured_routes = state.context.route_inputs.len(),
+                    "ignored Twitch notification for unconfigured broadcaster"
+                );
                 return Ok(StatusCode::NO_CONTENT.into_response());
             }
             let access_token = token(&state.client, &spec).await?;
@@ -334,15 +406,32 @@ async fn handle_webhook(
                     "url": format!("https://www.twitch.tv/{}", stream.user_login),
                 }
             });
-            state.context.sink.ingest(
+            let queued = state.context.sink.ingest(
                 &state.context.source_id,
                 &route_ids,
                 message_id,
                 &context,
             )?;
+            info!(
+                source_id = %state.context.source_id,
+                message_id,
+                broadcaster_login = %event.broadcaster_user_login,
+                broadcaster_id = %event.broadcaster_user_id,
+                route_count = route_ids.len(),
+                queued,
+                "accepted Twitch stream.online webhook"
+            );
             Ok(StatusCode::NO_CONTENT.into_response())
         }
-        _ => Ok(StatusCode::BAD_REQUEST.into_response()),
+        _ => {
+            warn!(
+                source_id = %state.context.source_id,
+                message_id,
+                message_type,
+                "rejected Twitch webhook with unsupported message type"
+            );
+            Ok(StatusCode::BAD_REQUEST.into_response())
+        }
     }
 }
 

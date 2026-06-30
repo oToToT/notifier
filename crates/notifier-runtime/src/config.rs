@@ -28,6 +28,8 @@ pub struct Config {
 pub struct ServerConfig {
     pub bind: SocketAddr,
     pub public_base_url: Url,
+    #[serde(default)]
+    pub log_level: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -101,6 +103,14 @@ impl Config {
         {
             bail!("server.public_base_url must use http or https");
         }
+        if self
+            .server
+            .log_level
+            .as_deref()
+            .is_some_and(|level| level.trim().is_empty())
+        {
+            bail!("server.log_level cannot be empty");
+        }
 
         let mut ids = HashSet::new();
         for route in &self.routes {
@@ -162,6 +172,7 @@ mod tests {
             server: ServerConfig {
                 bind: "127.0.0.1:8080".parse().unwrap(),
                 public_base_url: "https://example.test".parse().unwrap(),
+                log_level: None,
             },
             storage: StorageConfig {
                 sqlite_path: ":memory:".into(),

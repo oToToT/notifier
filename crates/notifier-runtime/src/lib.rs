@@ -19,7 +19,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::task::JoinSet;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub use config::{
     Config, DeliveryConfig, PluginConfig, RouteConfig, RouteEndpointConfig, ServerConfig,
@@ -73,7 +73,7 @@ impl DeliveryError {
         Self::Permanent(message.into())
     }
 
-    fn message(&self) -> &str {
+    pub fn message(&self) -> &str {
         match self {
             Self::Transient(message) | Self::Permanent(message) => message,
         }
@@ -157,8 +157,18 @@ impl EventSink {
             deliveries.push((route_id.clone(), message));
         }
         let source_plugin = source_plugin.context("source has no routes")?;
-        self.storage
-            .enqueue_batch(source_plugin, dedupe_key, &deliveries)
+        let queued = self
+            .storage
+            .enqueue_batch(source_plugin, dedupe_key, &deliveries)?;
+        info!(
+            source_id,
+            source_plugin,
+            route_count = route_ids.len(),
+            queued,
+            dedupe_key,
+            "event ingested"
+        );
+        Ok(queued)
     }
 }
 
@@ -198,6 +208,12 @@ impl RuntimeBuilder {
     }
 
     pub fn check_config(&self, config: Config) -> Result<Runtime> {
+        debug!(
+            sources = config.srcs.len(),
+            destinations = config.dsts.len(),
+            routes = config.routes.len(),
+            "checking configuration"
+        );
         config.validate_base()?;
         let mut prepared_sources = HashMap::new();
         for (id, definition) in &config.srcs {
@@ -267,6 +283,13 @@ impl RuntimeBuilder {
             let validated = plugin
                 .validate_spec(&source.spec, &source.route_inputs)
                 .with_context(|| format!("invalid source definition {id:?}"))?;
+            debug!(
+                source_id = %id,
+                plugin = %source.plugin,
+                route_count = source.route_inputs.len(),
+                http_path_count = validated.http_paths.len(),
+                "source configuration validated"
+            );
             for path in &validated.http_paths {
                 validate_http_path(path)
                     .with_context(|| format!("invalid webhook path on source {id:?}"))?;
@@ -282,6 +305,12 @@ impl RuntimeBuilder {
             plugin
                 .validate_spec(&destination.spec, inputs)
                 .with_context(|| format!("invalid destination definition {id:?}"))?;
+            debug!(
+                destination_id = %id,
+                plugin = %destination.plugin,
+                route_count = inputs.len(),
+                "destination configuration validated"
+            );
         }
 
         for route in &config.routes {
@@ -370,8 +399,21 @@ pub struct Runtime {
 
 impl Runtime {
     pub async fn serve(self) -> Result<()> {
+        info!(
+            bind = %self.config.server.bind,
+            public_base_url = %self.config.server.public_base_url,
+            source_count = self.prepared_sources.len(),
+            destination_count = self.prepared_destinations.len(),
+            route_count = self.routes.len(),
+            "runtime starting"
+        );
         let storage = Storage::open(&self.config.storage.sqlite_path)?;
+        info!(
+            sqlite_path = %self.config.storage.sqlite_path,
+            "storage opened"
+        );
         storage.recover(&self.routes.keys().cloned().collect::<HashSet<_>>())?;
+        info!("storage recovery completed");
         let sink = EventSink {
             storage: storage.clone(),
             routes: self.routes.clone(),
@@ -391,10 +433,17 @@ impl Runtime {
                 storage: storage.clone(),
                 sink: sink.clone(),
             };
+            info!(
+                source_id,
+                plugin = %source.plugin,
+                route_count = source.route_inputs.len(),
+                "reconciling source"
+            );
             plugin
                 .reconcile(&context)
                 .await
                 .with_context(|| format!("source {source_id:?} reconciliation failed"))?;
+            info!(source_id, plugin = %source.plugin, "source reconciled");
             app = app.merge(plugin.router(context.clone()));
         }
 
@@ -421,6 +470,7 @@ impl Runtime {
 
         let mut workers = JoinSet::new();
         for worker_id in 0..self.config.delivery.workers {
+            debug!(worker_id, "starting delivery worker");
             workers.spawn(delivery_worker(
                 worker_id,
                 storage.clone(),
@@ -445,6 +495,11 @@ impl Runtime {
                 storage: storage.clone(),
                 sink: sink.clone(),
             };
+            debug!(
+                source_id,
+                plugin = %source.plugin,
+                "starting source background task"
+            );
             workers.spawn(async move {
                 if let Err(error) = plugin.run(context).await {
                     error!(source_id, %error, "source background task exited");
@@ -457,6 +512,7 @@ impl Runtime {
         let result = axum::serve(listener, app)
             .await
             .context("HTTP server failed");
+        warn!("HTTP server stopped; aborting background workers");
         workers.abort_all();
         result
     }
@@ -483,11 +539,31 @@ async fn delivery_worker(
                 continue;
             }
         };
+        debug!(
+            worker_id,
+            delivery_id = delivery.id,
+            route_id = %delivery.route_id,
+            attempts = delivery.attempts,
+            "claimed delivery"
+        );
         let Some(route) = routes.get(&delivery.route_id) else {
+            warn!(
+                worker_id,
+                delivery_id = delivery.id,
+                route_id = %delivery.route_id,
+                "delivery route no longer exists"
+            );
             let _ = storage.dead_letter(delivery.id, delivery.attempts, "route no longer exists");
             continue;
         };
         let Some(destination) = prepared_destinations.get(&route.destination_id) else {
+            warn!(
+                worker_id,
+                delivery_id = delivery.id,
+                route_id = %delivery.route_id,
+                destination_id = %route.destination_id,
+                "delivery destination no longer exists"
+            );
             let _ = storage.dead_letter(
                 delivery.id,
                 delivery.attempts,
@@ -496,6 +572,14 @@ async fn delivery_worker(
             continue;
         };
         let Some(plugin) = destinations.get(&destination.plugin) else {
+            warn!(
+                worker_id,
+                delivery_id = delivery.id,
+                route_id = %delivery.route_id,
+                destination_id = %route.destination_id,
+                plugin = %destination.plugin,
+                "delivery destination plugin is unavailable"
+            );
             let _ = storage.dead_letter(
                 delivery.id,
                 delivery.attempts,
@@ -515,6 +599,15 @@ async fn delivery_worker(
             Ok(()) => {
                 if let Err(error) = storage.complete(delivery.id) {
                     error!(worker_id, %error, "failed to complete delivery");
+                } else {
+                    info!(
+                        worker_id,
+                        delivery_id = delivery.id,
+                        route_id = %delivery.route_id,
+                        destination_id = %route.destination_id,
+                        plugin = %destination.plugin,
+                        "delivery completed"
+                    );
                 }
             }
             Err(error) => {
@@ -653,6 +746,7 @@ mod tests {
             server: ServerConfig {
                 bind: "127.0.0.1:8080".parse().unwrap(),
                 public_base_url: "https://example.test".parse().unwrap(),
+                log_level: None,
             },
             storage: StorageConfig {
                 sqlite_path: ":memory:".into(),

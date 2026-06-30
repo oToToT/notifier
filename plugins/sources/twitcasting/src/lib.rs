@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use tracing::{debug, info, warn};
 use twitcasting::{
     AppAuth, Client, ScreenId, UserRef, WebhookEvent, WebhookEvents, WebhookListRequest,
     WebhookPayload, decode_webhook,
@@ -215,12 +216,26 @@ impl SourcePlugin for TwitCastingSource {
 }
 
 async fn webhook(State(state): State<WebhookState>, body: Bytes) -> Response {
+    let body_bytes = body.len();
+    debug!(
+        source_id = %state.context.source_id,
+        body_bytes,
+        "received TwitCasting webhook"
+    );
     match decode_webhook(&body)
         .context("invalid TwitCasting webhook")
         .and_then(|payload| handle_webhook(&state, payload))
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        Err(error) => {
+            warn!(
+                source_id = %state.context.source_id,
+                body_bytes,
+                error = %error,
+                "rejected TwitCasting webhook"
+            );
+            (StatusCode::BAD_REQUEST, error.to_string()).into_response()
+        }
     }
 }
 
@@ -231,15 +246,45 @@ fn handle_webhook(state: &WebhookState, body: WebhookPayload) -> Result<()> {
         broadcaster,
     } = body
     else {
+        debug!(
+            source_id = %state.context.source_id,
+            "ignored unsupported TwitCasting webhook event"
+        );
         return Ok(());
     };
     let spec = parse_spec(&state.context.spec)?;
     let route_ids =
         matching_route_ids(&state.context.route_inputs, broadcaster.screen_id.as_str())?;
-    if spec.webhook_signature != signature.expose_secret() || route_ids.is_empty() {
-        bail!("signature or broadcaster did not match");
+    if spec.webhook_signature != signature.expose_secret() {
+        warn!(
+            source_id = %state.context.source_id,
+            broadcaster_id = %broadcaster.id,
+            broadcaster_screen_id = %broadcaster.screen_id,
+            movie_id = %movie.id,
+            "rejected TwitCasting webhook with invalid signature"
+        );
+        bail!("signature did not match");
+    }
+    if route_ids.is_empty() {
+        warn!(
+            source_id = %state.context.source_id,
+            broadcaster_id = %broadcaster.id,
+            broadcaster_screen_id = %broadcaster.screen_id,
+            movie_id = %movie.id,
+            configured_routes = state.context.route_inputs.len(),
+            "rejected TwitCasting webhook for unconfigured broadcaster"
+        );
+        bail!("broadcaster did not match");
     }
     if movie.user_id != broadcaster.id {
+        debug!(
+            source_id = %state.context.source_id,
+            broadcaster_id = %broadcaster.id,
+            broadcaster_screen_id = %broadcaster.screen_id,
+            movie_id = %movie.id,
+            movie_user_id = %movie.user_id,
+            "ignored TwitCasting webhook because movie owner did not match broadcaster"
+        );
         return Ok(());
     }
 
@@ -266,10 +311,21 @@ fn handle_webhook(state: &WebhookState, body: WebhookPayload) -> Result<()> {
             "url": movie.link,
         }
     });
-    state
-        .context
-        .sink
-        .ingest(&state.context.source_id, &route_ids, &dedupe_key, &context)?;
+    let delivery_count =
+        state
+            .context
+            .sink
+            .ingest(&state.context.source_id, &route_ids, &dedupe_key, &context)?;
+    info!(
+        source_id = %state.context.source_id,
+        broadcaster_id = %broadcaster.id,
+        broadcaster_screen_id = %broadcaster.screen_id,
+        movie_id,
+        route_count = route_ids.len(),
+        delivery_count,
+        dedupe_key,
+        "accepted TwitCasting livestart webhook"
+    );
     Ok(())
 }
 

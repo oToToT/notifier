@@ -1,7 +1,8 @@
 {
   "server": {
     "bind": "127.0.0.1:8080",
-    "public_base_url": "https://notify.example.com"
+    "public_base_url": "https://notify.example.com",
+    "log_level": "info"
   },
   "storage": {
     "sqlite_path": "notifier.db"

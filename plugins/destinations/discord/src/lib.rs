@@ -12,6 +12,7 @@ use serenity::{
     http::{Http, HttpError},
     model::id::ChannelId,
 };
+use tracing::{debug, info, warn};
 
 #[derive(Clone)]
 pub struct DiscordDestination {}
@@ -78,6 +79,10 @@ impl DestinationPlugin for DiscordDestination {
                 format!("invalid destination input on route {:?}", route.route_id)
             })?;
         }
+        debug!(
+            route_count = inputs.len(),
+            "validated Discord destination configuration"
+        );
         Ok(())
     }
 
@@ -91,6 +96,10 @@ impl DestinationPlugin for DiscordDestination {
         let input =
             parse_input(input).map_err(|error| DeliveryError::permanent(error.to_string()))?;
         if message.chars().count() > 2_000 {
+            warn!(
+                message_chars = message.chars().count(),
+                "rejected Discord delivery because message is too long"
+            );
             return Err(DeliveryError::permanent(
                 "Discord message exceeds 2,000 characters",
             ));
@@ -100,6 +109,11 @@ impl DestinationPlugin for DiscordDestination {
                 DeliveryError::permanent(format!("invalid channel ID: {error}"))
             })?);
         let http = Http::new(&spec.bot_token);
+        debug!(
+            channel_id = %input.channel_id,
+            message_chars = message.chars().count(),
+            "sending Discord message"
+        );
         channel_id
             .send_message(
                 &http,
@@ -108,8 +122,18 @@ impl DestinationPlugin for DiscordDestination {
                     .allowed_mentions(CreateAllowedMentions::new()),
             )
             .await
-            .map(|_| ())
-            .map_err(classify_error)
+            .map(|_| {
+                info!(channel_id = %input.channel_id, "Discord message sent");
+            })
+            .map_err(|error| {
+                let classified = classify_error(error);
+                warn!(
+                    channel_id = %input.channel_id,
+                    error = classified.message(),
+                    "Discord delivery failed"
+                );
+                classified
+            })
     }
 }
 

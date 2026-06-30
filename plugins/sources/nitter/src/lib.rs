@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use url::Url;
 
 const DEFAULT_POLL_INTERVAL_SECONDS: u64 = 300;
@@ -247,7 +247,12 @@ impl SourcePlugin for NitterSource {
 
     fn validate_spec(&self, spec: &Value, inputs: &[RoutePluginInput]) -> Result<ValidatedSource> {
         parse_spec(spec)?;
-        configured_users(inputs)?;
+        let users = configured_users(inputs)?;
+        debug!(
+            user_count = users.len(),
+            route_count = inputs.len(),
+            "validated Nitter source configuration"
+        );
         Ok(ValidatedSource {
             allowed_template_variables: self.template_variables(),
             http_paths: Vec::new(),
@@ -266,10 +271,17 @@ impl SourcePlugin for NitterSource {
         let spec = parse_spec(&context.spec)?;
         let users = configured_users(&context.route_inputs)?;
         let mut retry_seconds = spec.retry_initial_seconds;
+        info!(
+            source_id = %context.source_id,
+            user_count = users.len(),
+            poll_interval_seconds = spec.poll_interval_seconds,
+            "starting Nitter polling"
+        );
 
         loop {
             let mut successes = 0usize;
             for user in &users {
+                debug!(source_id = %context.source_id, user, "polling Nitter user");
                 match poll_user(&self.client, &context, &spec, user).await {
                     Ok(()) => {
                         successes += 1;
@@ -289,11 +301,25 @@ impl SourcePlugin for NitterSource {
             let delay = if successes == 0 {
                 let delay = jittered_delay(retry_seconds, spec.retry_max_seconds);
                 retry_seconds = retry_seconds.saturating_mul(2).min(spec.retry_max_seconds);
+                warn!(
+                    source_id = %context.source_id,
+                    user_count = users.len(),
+                    delay,
+                    retry_seconds,
+                    "all Nitter fetches failed; backing off"
+                );
                 delay
             } else {
                 retry_seconds = spec.retry_initial_seconds;
                 spec.poll_interval_seconds
             };
+            debug!(
+                source_id = %context.source_id,
+                successes,
+                user_count = users.len(),
+                delay,
+                "Nitter polling cycle completed"
+            );
             tokio::time::sleep(Duration::from_secs(delay)).await;
         }
     }
@@ -318,7 +344,14 @@ async fn poll_user(
         .await
         .with_context(|| format!("failed to read {rss_url} response"))?;
     let items = parse_feed(&body, spec, user).context("failed to parse Nitter RSS")?;
-    process_items(context, spec, user, &rss_url, &items)?;
+    let notified = process_items(context, spec, user, &rss_url, &items)?;
+    info!(
+        source_id = %context.source_id,
+        user,
+        item_count = items.len(),
+        notified,
+        "Nitter user poll completed"
+    );
     Ok(())
 }
 
@@ -393,9 +426,18 @@ fn process_items(
                 "published_at": item.published_at,
             }
         });
-        context
-            .sink
-            .ingest(&context.source_id, &route_ids, &event_id, &context_json)?;
+        let queued =
+            context
+                .sink
+                .ingest(&context.source_id, &route_ids, &event_id, &context_json)?;
+        info!(
+            source_id = %context.source_id,
+            user,
+            tweet_id = %item.id,
+            route_count = route_ids.len(),
+            queued,
+            "accepted Nitter tweet"
+        );
     }
 
     let seen_keys = if baseline_completed {

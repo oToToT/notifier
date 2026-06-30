@@ -115,7 +115,9 @@ retry can produce a duplicate destination message.
 
 ## Logging
 
-Logging uses `tracing-subscriber` and defaults to `info`. Override it with `RUST_LOG`:
+Logging uses `tracing-subscriber` and defaults to `info`. Set `server.log_level` in
+`config.json` to values such as `debug`, `info`, `warn`, or a full tracing filter directive.
+`RUST_LOG` takes precedence when set:
 
 ```sh
 RUST_LOG=notifier_runtime=debug,notifier_server=debug cargo run -p notifier-server -- serve

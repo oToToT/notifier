@@ -11,6 +11,7 @@ use teloxide::{
     prelude::Requester,
     types::{ChatId, Recipient},
 };
+use tracing::{debug, info, warn};
 
 #[derive(Clone)]
 pub struct TelegramDestination {}
@@ -98,6 +99,10 @@ impl DestinationPlugin for TelegramDestination {
                 format!("invalid destination input on route {:?}", route.route_id)
             })?;
         }
+        debug!(
+            route_count = inputs.len(),
+            "validated Telegram destination configuration"
+        );
         Ok(())
     }
 
@@ -111,17 +116,36 @@ impl DestinationPlugin for TelegramDestination {
         let input =
             parse_input(input).map_err(|error| DeliveryError::permanent(error.to_string()))?;
         if message.chars().count() > 4_096 {
+            warn!(
+                message_chars = message.chars().count(),
+                "rejected Telegram delivery because message is too long"
+            );
             return Err(DeliveryError::permanent(
                 "Telegram message exceeds 4,096 characters",
             ));
         }
         let chat_id = parse_chat_id(&input.chat_id)
             .map_err(|error| DeliveryError::permanent(format!("invalid chat ID: {error}")))?;
+        debug!(
+            chat_id = %input.chat_id,
+            message_chars = message.chars().count(),
+            "sending Telegram message"
+        );
         Bot::new(spec.bot_token)
             .send_message(chat_id, message)
             .await
-            .map(|_| ())
-            .map_err(classify_error)
+            .map(|_| {
+                info!(chat_id = %input.chat_id, "Telegram message sent");
+            })
+            .map_err(|error| {
+                let classified = classify_error(error);
+                warn!(
+                    chat_id = %input.chat_id,
+                    error = classified.message(),
+                    "Telegram delivery failed"
+                );
+                classified
+            })
     }
 }
 
