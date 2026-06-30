@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/notifier-runtime",
+    "plugins/sources/nitter",
     "plugins/sources/twitch",
     "plugins/sources/twitcasting",
     "plugins/destinations/discord",
@@ -29,6 +30,7 @@ minijinja = { version = "2", features = ["builtins", "json"] }
 rand = "0.9"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rss = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 schemars = { version = "1", features = ["derive", "url2"] }
 serenity = { version = "0.12.5", default-features = false, features = ["builder", "http", "model", "rustls_backend"] }

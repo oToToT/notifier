@@ -10,6 +10,7 @@ clap.workspace = true
 notifier-destination-discord = { path = "../../plugins/destinations/discord" }
 notifier-destination-telegram = { path = "../../plugins/destinations/telegram" }
 notifier-runtime = { path = "../../crates/notifier-runtime" }
+notifier-source-nitter = { path = "../../plugins/sources/nitter" }
 notifier-source-twitch = { path = "../../plugins/sources/twitch" }
 notifier-source-twitcasting = { path = "../../plugins/sources/twitcasting" }
 serde_json.workspace = true

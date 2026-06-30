@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use notifier_destination_discord::DiscordDestination;
 use notifier_destination_telegram::TelegramDestination;
 use notifier_runtime::{Config, RuntimeBuilder};
+use notifier_source_nitter::NitterSource;
 use notifier_source_twitcasting::TwitCastingSource;
 use notifier_source_twitch::TwitchSource;
 use tracing_subscriber::EnvFilter;
@@ -34,6 +35,7 @@ enum Command {
 
 fn builder() -> RuntimeBuilder {
     RuntimeBuilder::new()
+        .source(NitterSource::new())
         .source(TwitchSource::new())
         .source(TwitCastingSource::new())
         .destination(DiscordDestination::new())

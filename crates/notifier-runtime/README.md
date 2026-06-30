@@ -49,6 +49,9 @@ pub trait SourcePlugin: Send + Sync {
     ) -> anyhow::Result<ValidatedSource>;
     fn router(&self, context: SourceContext) -> axum::Router;
     async fn reconcile(&self, context: &SourceContext) -> anyhow::Result<()>;
+    async fn run(&self, context: SourceContext) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 ```
 
@@ -60,12 +63,16 @@ The runtime validates those paths, ensures active paths are unique, and rejects 
 paths.
 
 `router` receives a `SourceContext` containing the source ID, public base URL, raw plugin
-spec, route inputs keyed by route ID, and an `EventSink`. Source webhooks select matching
-route IDs from those inputs and call `EventSink::ingest` after they authenticate and
-normalize an event.
+spec, route inputs keyed by route ID, SQLite `Storage`, and an `EventSink`. Source webhooks
+select matching route IDs from those inputs and call `EventSink::ingest` after they
+authenticate and normalize an event.
 
 `reconcile` runs during startup before readiness is enabled. Webhook sources use it to
 create missing external subscriptions.
+
+`run` is an optional background hook for polling or streaming sources. The runtime starts
+one task per active source after readiness is enabled and aborts those tasks when the HTTP
+server exits. The default implementation is a no-op.
 
 ## Destination plugins
 
@@ -148,6 +155,10 @@ dead-letter state.
 Delivery workers claim queued rows, call the destination plugin, complete successful rows,
 retry transient failures with exponential backoff and jitter capped at one hour, and retain
 permanent failures as dead-letter rows.
+
+`Storage` also exposes source-state helpers backed by `source_baselines` and
+`source_seen_items`. Polling plugins use these to persist first-fetch completion and seen
+event keys across restarts.
 
 ## HTTP integration
 

@@ -8,6 +8,7 @@ stored in SQLite before webhook success is returned, and delivery happens asynch
 
 Sources:
 
+- `nitter`: Nitter RSS polling for new tweets
 - `twitch`: Twitch EventSub `stream.online`
 - `twitcasting`: TwitCasting `livestart`
 
@@ -46,7 +47,8 @@ Readiness is enabled only after all configured source subscriptions reconcile su
 Reconciliation creates missing subscriptions; it does not delete provider subscriptions that
 are absent from the file. Twitch callback URLs are built from `public_base_url` and the
 source's `webhook_path`. The TwitCasting application's callback URL must be configured
-separately to the same full URL.
+separately to the same full URL. Nitter sources do not block readiness on RSS availability;
+fetch errors are logged and retried in the background.
 
 ## Templates
 
@@ -55,8 +57,15 @@ and built-in filters are available. Missing event values render as empty strings
 detectable unknown top-level variables are rejected at startup. Run the `schema` command for
 the complete plugin schemas and template-variable documentation.
 
-Twitch top-level variables are `event`, `broadcaster`, and `stream`. TwitCasting variables
-are `event`, `broadcaster`, and `movie`.
+Nitter top-level variables are `event`, `user`, and `tweet`. Twitch top-level variables are
+`event`, `broadcaster`, and `stream`. TwitCasting variables are `event`, `broadcaster`, and
+`movie`.
+
+Nitter source specs use `instance_url` for fetching RSS from `{instance_url}/{user}/rss`.
+Optional `tweet_url_base` rewrites notification links while leaving fetches on
+`instance_url`; useful values include `https://fxtwitter.com`, `https://vxtwitter.com`, and
+`https://x.com`. The default `first_fetch` mode is `mark_seen`; setting
+`first_fetch` to `notify_existing` may send every item currently present in the RSS feed.
 
 Messages are rendered during webhook ingestion and the rendered text is stored, making
 retries deterministic. V1 sends plain text only. Provider length limits are permanent
@@ -70,8 +79,9 @@ retained as dead-letter rows. Processing rows are recovered after restart. Queue
 route has been removed are moved to dead-letter state.
 
 Delivery is at least once. If a destination accepts a request but its response is lost, a
-retry can produce a duplicate. Webhook deduplication uses Twitch message IDs and a stable
-TwitCasting key derived from the broadcaster and movie.
+retry can produce a duplicate. Webhook deduplication uses Twitch message IDs, a stable
+TwitCasting key derived from the broadcaster and movie, and Nitter RSS item GUIDs falling
+back to item links.
 
 Credentials are literal values in reusable source and destination definitions. The service
 never logs specs or credentials; protect the configuration file and SQLite database using

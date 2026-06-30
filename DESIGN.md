@@ -8,6 +8,7 @@ and accepted deliveries are persisted before webhook handlers return success.
 
 V1 supports:
 
+- Nitter RSS polling
 - Twitch `stream.online`
 - TwitCasting `livestart`
 - Discord channel text messages
@@ -24,6 +25,7 @@ The workspace contains:
 
 - `crates/notifier-runtime`: plugin traits, configuration, templates, HTTP integration, SQLite
   persistence, workers, retries, health checks, and schema generation.
+- `plugins/sources/nitter`: Nitter RSS polling using `reqwest` and `rss`.
 - `plugins/sources/twitch`: Twitch EventSub handling using `twitch_api`.
 - `plugins/sources/twitcasting`: TwitCasting API and webhook handling using `twitcasting`.
 - `plugins/destinations/discord`: Discord delivery using `serenity`.
@@ -47,6 +49,7 @@ Plugin names must be unique within their category.
   instance, including the HTTP paths it exposes.
 - An Axum webhook router for one source definition.
 - Startup reconciliation of external provider subscriptions.
+- An optional background `run` hook for long-running polling or streaming tasks.
 
 `DestinationPlugin` provides:
 
@@ -56,11 +59,12 @@ Plugin names must be unique within their category.
 - Asynchronous delivery with route-local input and transient or permanent error
   classification.
 
-`EventSink` is passed to source plugins. It renders destination templates and transactionally
-persists one delivery per matching route.
+`EventSink` and `Storage` are passed to source plugins. `EventSink` renders destination
+templates and transactionally persists one delivery per matching route. `Storage` also
+persists source baselines and seen item keys for polling sources.
 
-The source abstraction is intended to support polling or WebSocket plugins in addition to
-HTTP handlers without changing routing or persistence semantics.
+The source abstraction supports polling or WebSocket plugins in addition to HTTP handlers
+without changing routing or persistence semantics.
 
 ## Configuration
 
@@ -168,6 +172,17 @@ TwitCasting exposes:
 - `broadcaster`: ID, screen ID, and display name.
 - `movie`: ID, title, subtitle, latest owner comment, and URL.
 
+Nitter exposes:
+
+- `event`: stable event ID, event kind, and published timestamp.
+- `user`: username, RSS URL, and profile URL.
+- `tweet`: RSS item ID, title, description, rewritten URL, and published timestamp.
+
+Nitter fetches `{instance_url}/{user}/rss`. `tweet_url_base` rewrites only `tweet.url`, with
+common values including `https://fxtwitter.com`, `https://vxtwitter.com`, and
+`https://x.com`. The default first fetch marks existing RSS items as seen; `notify_existing`
+may enqueue every current item in the feed.
+
 ## HTTP Endpoints
 
 The runtime exposes:
@@ -178,6 +193,8 @@ The runtime exposes:
 
 Webhook paths must be unique static absolute paths. Queries, fragments, captures, wildcards,
 trailing slashes, `/health`, and `/ready` are rejected before routers are constructed.
+Polling source failures are logged and retried by their background task and do not make
+`/ready` fail after startup.
 
 `/health` reports that the process and HTTP server are alive. `/ready` becomes successful
 only after SQLite recovery and all source reconciliation work succeeds.

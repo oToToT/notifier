@@ -48,6 +48,7 @@ pub struct SourceContext {
     pub public_base_url: url::Url,
     pub spec: Value,
     pub route_inputs: Vec<RoutePluginInput>,
+    pub storage: Storage,
     pub sink: EventSink,
 }
 
@@ -87,6 +88,9 @@ pub trait SourcePlugin: Send + Sync {
     fn validate_spec(&self, spec: &Value, inputs: &[RoutePluginInput]) -> Result<ValidatedSource>;
     fn router(&self, context: SourceContext) -> Router;
     async fn reconcile(&self, context: &SourceContext) -> Result<()>;
+    async fn run(&self, _context: SourceContext) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -384,13 +388,14 @@ impl Runtime {
                 public_base_url: self.config.server.public_base_url.clone(),
                 spec: source.spec.clone(),
                 route_inputs: source.route_inputs.clone(),
+                storage: storage.clone(),
                 sink: sink.clone(),
             };
             plugin
                 .reconcile(&context)
                 .await
                 .with_context(|| format!("source {source_id:?} reconciliation failed"))?;
-            app = app.merge(plugin.router(context));
+            app = app.merge(plugin.router(context.clone()));
         }
 
         self.ready.store(true, Ordering::Release);
@@ -424,6 +429,27 @@ impl Runtime {
                 self.prepared_destinations.clone(),
                 self.config.delivery.max_attempts,
             ));
+        }
+        for (source_id, source) in &self.prepared_sources {
+            let plugin = self
+                .sources
+                .get(&source.plugin)
+                .expect("prepared source plugin must be registered")
+                .clone();
+            let source_id = source_id.clone();
+            let context = SourceContext {
+                source_id: source_id.clone(),
+                public_base_url: self.config.server.public_base_url.clone(),
+                spec: source.spec.clone(),
+                route_inputs: source.route_inputs.clone(),
+                storage: storage.clone(),
+                sink: sink.clone(),
+            };
+            workers.spawn(async move {
+                if let Err(error) = plugin.run(context).await {
+                    error!(source_id, %error, "source background task exited");
+                }
+            });
         }
 
         let listener = tokio::net::TcpListener::bind(self.config.server.bind).await?;

@@ -54,6 +54,19 @@ impl Storage {
             );
             CREATE INDEX IF NOT EXISTS deliveries_claim
                 ON deliveries(state, available_at, id);
+            CREATE TABLE IF NOT EXISTS source_baselines (
+                source_id TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                completed_at INTEGER NOT NULL,
+                PRIMARY KEY(source_id, scope)
+            );
+            CREATE TABLE IF NOT EXISTS source_seen_items (
+                source_id TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                item_key TEXT NOT NULL,
+                seen_at INTEGER NOT NULL,
+                PRIMARY KEY(source_id, scope, item_key)
+            );
             ",
             )?;
         Ok(())
@@ -197,6 +210,82 @@ impl Storage {
         Ok(())
     }
 
+    pub fn source_baseline_completed(&self, source_id: &str, scope: &str) -> Result<bool> {
+        let exists = self
+            .connection
+            .lock()
+            .expect("SQLite mutex poisoned")
+            .query_row(
+                "SELECT 1 FROM source_baselines WHERE source_id = ? AND scope = ?",
+                params![source_id, scope],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        Ok(exists)
+    }
+
+    pub fn complete_source_baseline(&self, source_id: &str, scope: &str) -> Result<()> {
+        let now = unix_seconds();
+        self.connection
+            .lock()
+            .expect("SQLite mutex poisoned")
+            .execute(
+                "INSERT OR IGNORE INTO source_baselines
+                 (source_id, scope, completed_at)
+                 VALUES (?, ?, ?)",
+                params![source_id, scope, now],
+            )?;
+        Ok(())
+    }
+
+    pub fn mark_source_items_seen(
+        &self,
+        source_id: &str,
+        scope: &str,
+        item_keys: &[String],
+    ) -> Result<usize> {
+        let now = unix_seconds();
+        let mut connection = self.connection.lock().expect("SQLite mutex poisoned");
+        let transaction = connection.transaction()?;
+        let mut inserted = 0;
+        for item_key in item_keys {
+            inserted += transaction.execute(
+                "INSERT OR IGNORE INTO source_seen_items
+                 (source_id, scope, item_key, seen_at)
+                 VALUES (?, ?, ?, ?)",
+                params![source_id, scope, item_key, now],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(inserted)
+    }
+
+    pub fn unseen_source_items(
+        &self,
+        source_id: &str,
+        scope: &str,
+        item_keys: &[String],
+    ) -> Result<Vec<String>> {
+        let connection = self.connection.lock().expect("SQLite mutex poisoned");
+        let mut unseen = Vec::new();
+        for item_key in item_keys {
+            let exists = connection
+                .query_row(
+                    "SELECT 1 FROM source_seen_items
+                     WHERE source_id = ? AND scope = ? AND item_key = ?",
+                    params![source_id, scope, item_key],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !exists {
+                unseen.push(item_key.clone());
+            }
+        }
+        Ok(unseen)
+    }
+
     #[cfg(test)]
     pub(crate) fn state(&self, id: i64) -> Result<String> {
         Ok(self
@@ -246,5 +335,39 @@ mod tests {
         let delivery = storage.claim().unwrap().unwrap();
         storage.recover(&HashSet::new()).unwrap();
         assert_eq!(storage.state(delivery.id).unwrap(), "dead");
+    }
+
+    #[test]
+    fn persists_source_baselines_and_seen_items() {
+        let storage = Storage::open(":memory:").unwrap();
+        assert!(!storage.source_baseline_completed("source", "user").unwrap());
+        storage.complete_source_baseline("source", "user").unwrap();
+        assert!(storage.source_baseline_completed("source", "user").unwrap());
+
+        let keys = vec!["one".into(), "two".into()];
+        assert_eq!(
+            storage
+                .unseen_source_items("source", "user", &keys)
+                .unwrap(),
+            keys
+        );
+        assert_eq!(
+            storage
+                .mark_source_items_seen("source", "user", &keys)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            storage
+                .mark_source_items_seen("source", "user", &["one".into()])
+                .unwrap(),
+            0
+        );
+        assert!(
+            storage
+                .unseen_source_items("source", "user", &keys)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

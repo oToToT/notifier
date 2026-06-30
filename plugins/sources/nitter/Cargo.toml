@@ -1,0 +1,21 @@
+[package]
+name = "notifier-source-nitter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+notifier-runtime = { path = "../../../crates/notifier-runtime" }
+rand.workspace = true
+reqwest.workspace = true
+rss.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
