@@ -1,0 +1,102 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: checks
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            os: macos-latest
+            target: x86_64-apple-darwin
+            use-cross: false
+            binary-suffix: ""
+          - name: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            use-cross: true
+            binary-suffix: ""
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            use-cross: false
+            binary-suffix: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cross
+        if: matrix.use-cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cross build --locked --release -p notifier-server --target "${{ matrix.target }}"
+          else
+            cargo build --locked --release -p notifier-server --target "${{ matrix.target }}"
+          fi
+
+      - name: Package binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/notifier-server${{ matrix.binary-suffix }}" \
+            "dist/notifier-server-${{ matrix.name }}${{ matrix.binary-suffix }}"
+          tar -C dist -czf "notifier-server-${{ matrix.name }}.tar.gz" \
+            "notifier-server-${{ matrix.name }}${{ matrix.binary-suffix }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: notifier-server-${{ matrix.name }}
+          path: notifier-server-${{ matrix.name }}.tar.gz
+          if-no-files-found: error
