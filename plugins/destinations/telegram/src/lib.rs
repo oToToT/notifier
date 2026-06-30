@@ -6,7 +6,11 @@ use notifier_runtime::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
-use teloxide::{ApiError, Bot, RequestError, prelude::Requester, types::ChatId};
+use teloxide::{
+    ApiError, Bot, RequestError,
+    prelude::Requester,
+    types::{ChatId, Recipient},
+};
 
 #[derive(Clone)]
 pub struct TelegramDestination {}
@@ -45,14 +49,35 @@ fn parse_spec(value: &Value) -> Result<Spec> {
 
 fn parse_input(value: &Value) -> Result<Input> {
     let input: Input = serde_json::from_value(value.clone()).context("invalid Telegram input")?;
-    if input.chat_id.trim().is_empty() {
+    parse_chat_id(&input.chat_id)?;
+    Ok(input)
+}
+
+fn parse_chat_id(chat_id: &str) -> Result<Recipient> {
+    let chat_id = chat_id.trim();
+    if chat_id.is_empty() {
         anyhow::bail!("chat_id cannot be empty");
     }
-    input
-        .chat_id
-        .parse::<i64>()
-        .context("chat_id must be a signed integer")?;
-    Ok(input)
+
+    if let Ok(id) = chat_id.parse::<i64>() {
+        return Ok(Recipient::Id(ChatId(id)));
+    }
+
+    let username = chat_id.strip_prefix('@').with_context(
+        || "chat_id must be a signed integer or a Telegram channel username like @channelusername",
+    )?;
+    if username.len() < 5
+        || username.len() > 32
+        || !username
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        anyhow::bail!(
+            "chat_id channel username must be 5-32 ASCII letters, digits, or underscores after @"
+        );
+    }
+
+    Ok(Recipient::ChannelUsername(chat_id.to_owned()))
 }
 
 #[async_trait]
@@ -90,10 +115,7 @@ impl DestinationPlugin for TelegramDestination {
                 "Telegram message exceeds 4,096 characters",
             ));
         }
-        let chat_id = input
-            .chat_id
-            .parse::<i64>()
-            .map(ChatId)
+        let chat_id = parse_chat_id(&input.chat_id)
             .map_err(|error| DeliveryError::permanent(format!("invalid chat ID: {error}")))?;
         Bot::new(spec.bot_token)
             .send_message(chat_id, message)
@@ -142,6 +164,28 @@ mod tests {
                 }],
             )
             .unwrap();
+
+        plugin
+            .validate_spec(
+                &json!({"bot_token": "x"}),
+                &[RoutePluginInput {
+                    route_id: "route".into(),
+                    input: json!({"chat_id": "@nanabunnonijyuuni_tweet"}),
+                }],
+            )
+            .unwrap();
+
+        assert!(
+            plugin
+                .validate_spec(
+                    &json!({"bot_token": "x"}),
+                    &[RoutePluginInput {
+                        route_id: "route".into(),
+                        input: json!({"chat_id": "@bad"}),
+                    }],
+                )
+                .is_err()
+        );
 
         assert!(
             plugin

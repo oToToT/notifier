@@ -42,7 +42,7 @@ Use this plugin in the `dsts` map, then provide route-local chat inputs from rou
       "dst": {
         "id": "telegram-main",
         "input": {
-          "chat_id": "-1001234567890"
+          "chat_id": "@channelusername"
         }
       },
       "message": "message text"
@@ -57,10 +57,12 @@ Spec fields:
 
 Route input fields:
 
-- `chat_id`: target Telegram chat ID as a signed integer string.
+- `chat_id`: target Telegram chat ID as a signed integer string, or a public channel
+  username such as `@channelusername`.
 
-Both fields are required in their respective locations and must be non-empty. `chat_id` must
-parse as `i64`.
+Both fields are required in their respective locations and must be non-empty. Numeric
+`chat_id` values must parse as `i64`. Channel usernames must include the leading `@` and
+use 5-32 ASCII letters, digits, or underscores after it.
 
 ## Failure handling
 
