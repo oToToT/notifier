@@ -46,5 +46,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-twitcasting = "0.1.1"
+twitcasting = "0.2"
 twitch_api = { version = "0.8.0", features = ["eventsub", "helix", "hmac", "reqwest", "twitch_oauth2"] }

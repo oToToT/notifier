@@ -3169,9 +3169,9 @@ dependencies = [
 
 [[package]]
 name = "twitcasting"
-version = "0.1.1"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1faa03ed02cbe675c5aef3d0a5401e7de86c8c246019a0bce3a0fc7a8bd6c2f"
+checksum = "58f27d89080f05d42721fdeb53f16815c4f1a7a28c7fc37b82fa89315f06a25d"
 dependencies = [
  "bytes",
  "reqwest 0.12.15",
