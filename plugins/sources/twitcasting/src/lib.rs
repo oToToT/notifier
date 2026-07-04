@@ -183,8 +183,21 @@ impl SourcePlugin for TwitCastingSource {
     }
 
     fn validate_spec(&self, spec: &Value, inputs: &[RoutePluginInput]) -> Result<ValidatedSource> {
-        let spec = parse_spec(spec)?;
-        configured_broadcasters(inputs)?;
+        let spec = parse_spec(spec).inspect_err(|error| {
+            debug!(
+                route_count = inputs.len(),
+                error = %error,
+                "rejected TwitCasting source configuration"
+            );
+        })?;
+        configured_broadcasters(inputs).inspect_err(|error| {
+            debug!(
+                route_count = inputs.len(),
+                webhook_path = %spec.webhook_path,
+                error = %error,
+                "rejected TwitCasting route input configuration"
+            );
+        })?;
         Ok(ValidatedSource {
             allowed_template_variables: self.template_variables(),
             http_paths: vec![spec.webhook_path],
@@ -199,16 +212,74 @@ impl SourcePlugin for TwitCastingSource {
     }
 
     async fn reconcile(&self, context: &SourceContext) -> Result<()> {
-        let spec = parse_spec(&context.spec)?;
-        let hooks = list_webhooks(&spec).await?;
-        for broadcaster in configured_broadcasters(&context.route_inputs)? {
-            let user_id = resolve_user(&spec, &broadcaster).await?;
+        let spec = parse_spec(&context.spec).inspect_err(|error| {
+            debug!(
+                source_id = %context.source_id,
+                error = %error,
+                "TwitCasting reconciliation rejected source configuration"
+            );
+        })?;
+        debug!(
+            source_id = %context.source_id,
+            api_base_url = %spec.api_base_url,
+            "listing TwitCasting webhooks"
+        );
+        let hooks = list_webhooks(&spec).await.inspect_err(|error| {
+            debug!(
+                source_id = %context.source_id,
+                api_base_url = %spec.api_base_url,
+                error = %error,
+                "failed to list TwitCasting webhooks during reconciliation"
+            );
+        })?;
+        let broadcasters = configured_broadcasters(&context.route_inputs).inspect_err(|error| {
+            debug!(
+                source_id = %context.source_id,
+                route_count = context.route_inputs.len(),
+                error = %error,
+                "TwitCasting reconciliation rejected route input configuration"
+            );
+        })?;
+        for broadcaster in broadcasters {
+            let user_id = resolve_user(&spec, &broadcaster)
+                .await
+                .inspect_err(|error| {
+                    debug!(
+                        source_id = %context.source_id,
+                        broadcaster,
+                        api_base_url = %spec.api_base_url,
+                        error = %error,
+                        "failed to resolve TwitCasting broadcaster during reconciliation"
+                    );
+                })?;
             let exists = hooks
                 .webhooks
                 .iter()
                 .any(|hook| hook.user_id == user_id && hook.event == WebhookEvent::LiveStart);
             if !exists {
-                create_webhook(&spec, &user_id).await?;
+                debug!(
+                    source_id = %context.source_id,
+                    broadcaster,
+                    user_id = %user_id,
+                    "creating TwitCasting livestart webhook"
+                );
+                create_webhook(&spec, &user_id).await.inspect_err(|error| {
+                    debug!(
+                        source_id = %context.source_id,
+                        broadcaster,
+                        user_id = %user_id,
+                        api_base_url = %spec.api_base_url,
+                        error = %error,
+                        "failed to create TwitCasting livestart webhook during reconciliation"
+                    );
+                })?;
+            } else {
+                debug!(
+                    source_id = %context.source_id,
+                    broadcaster,
+                    user_id = %user_id,
+                    "TwitCasting livestart webhook already exists"
+                );
             }
         }
         Ok(())
@@ -228,6 +299,13 @@ async fn webhook(State(state): State<WebhookState>, body: Bytes) -> Response {
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => {
+            debug!(
+                source_id = %state.context.source_id,
+                body_bytes,
+                body = %String::from_utf8_lossy(&body),
+                error = %error,
+                "TwitCasting webhook rejection details"
+            );
             warn!(
                 source_id = %state.context.source_id,
                 body_bytes,
@@ -240,22 +318,97 @@ async fn webhook(State(state): State<WebhookState>, body: Bytes) -> Response {
 }
 
 fn handle_webhook(state: &WebhookState, body: WebhookPayload) -> Result<()> {
-    let WebhookPayload::LiveStart {
-        signature,
-        movie,
-        broadcaster,
-    } = body
-    else {
+    let (signature, movie, broadcaster) = match body {
+        WebhookPayload::LiveStart {
+            signature,
+            movie,
+            broadcaster,
+        } => (signature, movie, broadcaster),
+        WebhookPayload::LiveEnd {
+            movie, broadcaster, ..
+        } => {
+            debug!(
+                source_id = %state.context.source_id,
+                event_kind = "liveend",
+                broadcaster_id = %broadcaster.id,
+                broadcaster_screen_id = %broadcaster.screen_id,
+                movie_id = %movie.id,
+                "ignored unsupported TwitCasting webhook event"
+            );
+            return Ok(());
+        }
+        WebhookPayload::LiveScheduleCreate { live_schedule, .. } => {
+            debug!(
+                source_id = %state.context.source_id,
+                event_kind = "liveschedulecreate",
+                live_schedule_id = %live_schedule.id,
+                "ignored unsupported TwitCasting webhook event"
+            );
+            return Ok(());
+        }
+        WebhookPayload::LiveScheduleUpdate { live_schedule, .. } => {
+            debug!(
+                source_id = %state.context.source_id,
+                event_kind = "livescheduleupdate",
+                live_schedule_id = %live_schedule.id,
+                "ignored unsupported TwitCasting webhook event"
+            );
+            return Ok(());
+        }
+        WebhookPayload::LiveScheduleDelete {
+            live_schedule_id, ..
+        } => {
+            debug!(
+                source_id = %state.context.source_id,
+                event_kind = "livescheduledelete",
+                live_schedule_id = %live_schedule_id,
+                "ignored unsupported TwitCasting webhook event"
+            );
+            return Ok(());
+        }
+        WebhookPayload::Unknown {
+            event, signature, ..
+        } => {
+            debug!(
+                source_id = %state.context.source_id,
+                event_kind = %event,
+                has_signature = signature.is_some(),
+                "ignored unknown TwitCasting webhook event"
+            );
+            return Ok(());
+        }
+    };
+    let spec = parse_spec(&state.context.spec).inspect_err(|error| {
         debug!(
             source_id = %state.context.source_id,
-            "ignored unsupported TwitCasting webhook event"
+            error = %error,
+            "TwitCasting webhook rejected source configuration"
         );
-        return Ok(());
-    };
-    let spec = parse_spec(&state.context.spec)?;
-    let route_ids =
-        matching_route_ids(&state.context.route_inputs, broadcaster.screen_id.as_str())?;
+    })?;
+    let route_ids = matching_route_ids(&state.context.route_inputs, broadcaster.screen_id.as_str())
+        .inspect_err(|error| {
+            debug!(
+                source_id = %state.context.source_id,
+                broadcaster_id = %broadcaster.id,
+                broadcaster_screen_id = %broadcaster.screen_id,
+                movie_id = %movie.id,
+                configured_routes = state.context.route_inputs.len(),
+                error = %error,
+                "TwitCasting webhook rejected route input configuration"
+            );
+        })?;
     if spec.webhook_signature != signature.expose_secret() {
+        debug!(
+            source_id = %state.context.source_id,
+            broadcaster_id = %broadcaster.id,
+            broadcaster_screen_id = %broadcaster.screen_id,
+            movie_id = %movie.id,
+            expected_signature = %spec.webhook_signature,
+            received_signature = %signature.expose_secret(),
+            expected_signature_len = spec.webhook_signature.len(),
+            received_signature_len = signature.expose_secret().len(),
+            "TwitCasting webhook signature mismatch details"
+        );
         warn!(
             source_id = %state.context.source_id,
             broadcaster_id = %broadcaster.id,
@@ -266,6 +419,14 @@ fn handle_webhook(state: &WebhookState, body: WebhookPayload) -> Result<()> {
         bail!("signature did not match");
     }
     if route_ids.is_empty() {
+        debug!(
+            source_id = %state.context.source_id,
+            broadcaster_id = %broadcaster.id,
+            broadcaster_screen_id = %broadcaster.screen_id,
+            movie_id = %movie.id,
+            configured_routes = state.context.route_inputs.len(),
+            "TwitCasting webhook broadcaster did not match any configured route"
+        );
         warn!(
             source_id = %state.context.source_id,
             broadcaster_id = %broadcaster.id,
@@ -311,11 +472,22 @@ fn handle_webhook(state: &WebhookState, body: WebhookPayload) -> Result<()> {
             "url": movie.link,
         }
     });
-    let delivery_count =
-        state
-            .context
-            .sink
-            .ingest(&state.context.source_id, &route_ids, &dedupe_key, &context)?;
+    let delivery_count = state
+        .context
+        .sink
+        .ingest(&state.context.source_id, &route_ids, &dedupe_key, &context)
+        .inspect_err(|error| {
+            debug!(
+                source_id = %state.context.source_id,
+                broadcaster_id = %broadcaster.id,
+                broadcaster_screen_id = %broadcaster.screen_id,
+                movie_id,
+                route_count = route_ids.len(),
+                dedupe_key,
+                error = %error,
+                "failed to ingest TwitCasting webhook delivery"
+            );
+        })?;
     info!(
         source_id = %state.context.source_id,
         broadcaster_id = %broadcaster.id,

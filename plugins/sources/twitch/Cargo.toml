@@ -10,6 +10,7 @@ async-trait.workspace = true
 axum.workspace = true
 futures.workspace = true
 hex.workspace = true
+hmac.workspace = true
 http.workspace = true
 notifier-runtime = { path = "../../../crates/notifier-runtime" }
 reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["json", "rustls"] }
@@ -22,6 +23,5 @@ twitch_api.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-hmac.workspace = true
 tokio.workspace = true
 tower.workspace = true

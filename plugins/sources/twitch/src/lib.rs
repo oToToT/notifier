@@ -9,12 +9,14 @@ use axum::{
     routing::post,
 };
 use futures::TryStreamExt;
+use hmac::{Hmac, Mac};
 use notifier_runtime::{
     PluginMetadata, RoutePluginInput, SourceContext, SourcePlugin, ValidatedSource, schema_value,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::Sha256;
 use std::collections::HashSet;
 use tracing::{debug, info, warn};
 use twitch_api::{
@@ -213,8 +215,21 @@ impl SourcePlugin for TwitchSource {
     }
 
     fn validate_spec(&self, spec: &Value, inputs: &[RoutePluginInput]) -> Result<ValidatedSource> {
-        let spec = parse_spec(spec)?;
-        let broadcasters = configured_broadcasters(inputs)?;
+        let spec = parse_spec(spec).inspect_err(|error| {
+            debug!(
+                route_count = inputs.len(),
+                error = %error,
+                "rejected Twitch source configuration"
+            );
+        })?;
+        let broadcasters = configured_broadcasters(inputs).inspect_err(|error| {
+            debug!(
+                route_count = inputs.len(),
+                webhook_path = %spec.webhook_path,
+                error = %error,
+                "rejected Twitch route input configuration"
+            );
+        })?;
         debug!(
             broadcaster_count = broadcasters.len(),
             route_count = inputs.len(),
@@ -238,7 +253,13 @@ impl SourcePlugin for TwitchSource {
     }
 
     async fn reconcile(&self, context: &SourceContext) -> Result<()> {
-        let spec = parse_spec(&context.spec)?;
+        let spec = parse_spec(&context.spec).inspect_err(|error| {
+            debug!(
+                source_id = %context.source_id,
+                error = %error,
+                "Twitch reconciliation rejected source configuration"
+            );
+        })?;
         let callback = context
             .public_base_url
             .join(&spec.webhook_path)?
@@ -248,16 +269,46 @@ impl SourcePlugin for TwitchSource {
             callback,
             "reconciling Twitch EventSub subscriptions"
         );
-        let token = token(&self.client, &spec).await?;
-        let broadcasters = configured_broadcasters(&context.route_inputs)?;
+        let token = token(&self.client, &spec).await.inspect_err(|error| {
+            debug!(
+                source_id = %context.source_id,
+                error = %error,
+                "failed to request Twitch token during reconciliation"
+            );
+        })?;
+        let broadcasters = configured_broadcasters(&context.route_inputs).inspect_err(|error| {
+            debug!(
+                source_id = %context.source_id,
+                route_count = context.route_inputs.len(),
+                error = %error,
+                "Twitch reconciliation rejected route input configuration"
+            );
+        })?;
         let pages = self
             .client
             .helix
             .get_eventsub_subscriptions(None, Some(EventType::StreamOnline), None, &token)
             .try_collect::<Vec<_>>()
-            .await?;
+            .await
+            .inspect_err(|error| {
+                debug!(
+                    source_id = %context.source_id,
+                    callback,
+                    error = %error,
+                    "failed to list Twitch EventSub subscriptions during reconciliation"
+                );
+            })?;
         for broadcaster_login in broadcasters {
-            let broadcaster = resolve_user(&self.client, &broadcaster_login, &token).await?;
+            let broadcaster = resolve_user(&self.client, &broadcaster_login, &token)
+                .await
+                .inspect_err(|error| {
+                    debug!(
+                        source_id = %context.source_id,
+                        broadcaster_login,
+                        error = %error,
+                        "failed to resolve Twitch broadcaster during reconciliation"
+                    );
+                })?;
             let exists = pages
                 .iter()
                 .flat_map(|page| &page.subscriptions)
@@ -269,20 +320,31 @@ impl SourcePlugin for TwitchSource {
                             .is_some_and(|transport| transport.callback == callback)
                 });
             if !exists {
+                let broadcaster_id = broadcaster.id.clone();
                 info!(
                     source_id = %context.source_id,
                     broadcaster_login,
-                    broadcaster_id = %broadcaster.id,
+                    broadcaster_id = %broadcaster_id,
                     "creating Twitch EventSub subscription"
                 );
                 self.client
                     .helix
                     .create_eventsub_subscription(
-                        StreamOnlineV1::broadcaster_user_id(broadcaster.id),
+                        StreamOnlineV1::broadcaster_user_id(broadcaster_id.clone()),
                         Transport::webhook(&callback, spec.webhook_secret.clone()),
                         &token,
                     )
-                    .await?;
+                    .await
+                    .inspect_err(|error| {
+                        debug!(
+                            source_id = %context.source_id,
+                            broadcaster_login,
+                            broadcaster_id = %broadcaster_id,
+                            callback,
+                            error = %error,
+                            "failed to create Twitch EventSub subscription during reconciliation"
+                        );
+                    })?;
             } else {
                 debug!(
                     source_id = %context.source_id,
@@ -306,6 +368,14 @@ async fn webhook(State(state): State<WebhookState>, headers: HeaderMap, body: By
     match handle_webhook(&state, &headers, &body).await {
         Ok(response) => response,
         Err(error) => {
+            debug!(
+                source_id = %state.context.source_id,
+                body_bytes = body.len(),
+                headers = ?headers,
+                body = %String::from_utf8_lossy(&body),
+                error = %error,
+                "Twitch webhook rejection details"
+            );
             warn!(
                 source_id = %state.context.source_id,
                 body_bytes = body.len(),
@@ -326,10 +396,42 @@ async fn handle_webhook(
     let timestamp = header(headers, "twitch-eventsub-message-timestamp")?;
     let signature = header(headers, "twitch-eventsub-message-signature")?;
     let message_type = header(headers, "twitch-eventsub-message-type")?;
-    let parsed: WebhookBody = serde_json::from_slice(body).context("invalid webhook JSON")?;
+    let parsed: WebhookBody = serde_json::from_slice(body)
+        .context("invalid webhook JSON")
+        .inspect_err(|error| {
+            debug!(
+                source_id = %state.context.source_id,
+                message_id,
+                message_type,
+                body_bytes = body.len(),
+                body = %String::from_utf8_lossy(body),
+                error = %error,
+                "Twitch webhook JSON decode failed"
+            );
+        })?;
 
-    let spec = parse_spec(&state.context.spec)?;
-    if !verify_signature(&spec.webhook_secret, message_id, timestamp, body, signature) {
+    let spec = parse_spec(&state.context.spec).inspect_err(|error| {
+        debug!(
+            source_id = %state.context.source_id,
+            message_id,
+            message_type,
+            error = %error,
+            "Twitch webhook rejected source configuration"
+        );
+    })?;
+    let signature_verification =
+        verify_signature(&spec.webhook_secret, message_id, timestamp, body, signature);
+    if !signature_verification.valid {
+        debug!(
+            source_id = %state.context.source_id,
+            message_id,
+            message_type,
+            timestamp,
+            received_signature = signature,
+            expected_signature = signature_verification.expected.as_deref(),
+            body_bytes = body.len(),
+            "Twitch webhook signature mismatch details"
+        );
         warn!(
             source_id = %state.context.source_id,
             message_id,
@@ -341,7 +443,18 @@ async fn handle_webhook(
 
     match message_type {
         "webhook_callback_verification" => {
-            let challenge = parsed.challenge.context("challenge is missing")?;
+            let challenge = parsed
+                .challenge
+                .context("challenge is missing")
+                .inspect_err(|error| {
+                    debug!(
+                        source_id = %state.context.source_id,
+                        message_id,
+                        message_type,
+                        error = %error,
+                        "rejected Twitch webhook verification because challenge is missing"
+                    );
+                })?;
             info!(
                 source_id = %state.context.source_id,
                 message_id,
@@ -350,6 +463,12 @@ async fn handle_webhook(
             Ok((StatusCode::OK, challenge).into_response())
         }
         "revocation" => {
+            debug!(
+                source_id = %state.context.source_id,
+                message_id,
+                subscription_type = %parsed.subscription.kind,
+                "received Twitch subscription revocation details"
+            );
             warn!(
                 source_id = %state.context.source_id,
                 message_id,
@@ -368,10 +487,41 @@ async fn handle_webhook(
                 );
                 return Ok(StatusCode::NO_CONTENT.into_response());
             }
-            let event = parsed.event.context("event is missing")?;
+            let event = parsed
+                .event
+                .context("event is missing")
+                .inspect_err(|error| {
+                    debug!(
+                        source_id = %state.context.source_id,
+                        message_id,
+                        message_type,
+                        subscription_type = %parsed.subscription.kind,
+                        error = %error,
+                        "rejected Twitch notification because event is missing"
+                    );
+                })?;
             let route_ids =
-                matching_route_ids(&state.context.route_inputs, &event.broadcaster_user_login)?;
+                matching_route_ids(&state.context.route_inputs, &event.broadcaster_user_login)
+                    .inspect_err(|error| {
+                        debug!(
+                            source_id = %state.context.source_id,
+                            message_id,
+                            broadcaster_login = %event.broadcaster_user_login,
+                            broadcaster_id = %event.broadcaster_user_id,
+                            configured_routes = state.context.route_inputs.len(),
+                            error = %error,
+                            "Twitch webhook rejected route input configuration"
+                        );
+                    })?;
             if route_ids.is_empty() {
+                debug!(
+                    source_id = %state.context.source_id,
+                    message_id,
+                    broadcaster_login = %event.broadcaster_user_login,
+                    broadcaster_id = %event.broadcaster_user_id,
+                    configured_routes = state.context.route_inputs.len(),
+                    "Twitch notification broadcaster did not match any configured route"
+                );
                 warn!(
                     source_id = %state.context.source_id,
                     message_id,
@@ -382,14 +532,33 @@ async fn handle_webhook(
                 );
                 return Ok(StatusCode::NO_CONTENT.into_response());
             }
-            let access_token = token(&state.client, &spec).await?;
+            let access_token = token(&state.client, &spec).await.inspect_err(|error| {
+                debug!(
+                    source_id = %state.context.source_id,
+                    message_id,
+                    broadcaster_login = %event.broadcaster_user_login,
+                    broadcaster_id = %event.broadcaster_user_id,
+                    error = %error,
+                    "failed to request Twitch token while handling webhook"
+                );
+            })?;
             let stream = get_stream(
                 &state.client,
                 &spec,
                 &access_token,
                 &event.broadcaster_user_id,
             )
-            .await?;
+            .await
+            .inspect_err(|error| {
+                debug!(
+                    source_id = %state.context.source_id,
+                    message_id,
+                    broadcaster_login = %event.broadcaster_user_login,
+                    broadcaster_id = %event.broadcaster_user_id,
+                    error = %error,
+                    "failed to fetch Twitch stream while handling webhook"
+                );
+            })?;
             let context = json!({
                 "event": {
                     "id": message_id,
@@ -406,12 +575,21 @@ async fn handle_webhook(
                     "url": format!("https://www.twitch.tv/{}", stream.user_login),
                 }
             });
-            let queued = state.context.sink.ingest(
-                &state.context.source_id,
-                &route_ids,
-                message_id,
-                &context,
-            )?;
+            let queued = state
+                .context
+                .sink
+                .ingest(&state.context.source_id, &route_ids, message_id, &context)
+                .inspect_err(|error| {
+                    debug!(
+                        source_id = %state.context.source_id,
+                        message_id,
+                        broadcaster_login = %event.broadcaster_user_login,
+                        broadcaster_id = %event.broadcaster_user_id,
+                        route_count = route_ids.len(),
+                        error = %error,
+                        "failed to ingest Twitch webhook delivery"
+                    );
+                })?;
             info!(
                 source_id = %state.context.source_id,
                 message_id,
@@ -424,6 +602,14 @@ async fn handle_webhook(
             Ok(StatusCode::NO_CONTENT.into_response())
         }
         _ => {
+            debug!(
+                source_id = %state.context.source_id,
+                message_id,
+                message_type,
+                body_bytes = body.len(),
+                body = %String::from_utf8_lossy(body),
+                "rejected Twitch webhook with unsupported message type"
+            );
             warn!(
                 source_id = %state.context.source_id,
                 message_id,
@@ -443,22 +629,44 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str> {
         .context("Twitch header is not valid UTF-8")
 }
 
+#[derive(Debug)]
+struct SignatureVerification {
+    valid: bool,
+    expected: Option<String>,
+}
+
 fn verify_signature(
     secret: &str,
     message_id: &str,
     timestamp: &str,
     body: &[u8],
     signature: &str,
-) -> bool {
+) -> SignatureVerification {
+    let expected = expected_signature(secret, message_id, timestamp, body);
     let Ok(request) = http::Request::builder()
         .header("Twitch-Eventsub-Message-Id", message_id)
         .header("Twitch-Eventsub-Message-Timestamp", timestamp)
         .header("Twitch-Eventsub-Message-Signature", signature)
         .body(body)
     else {
-        return false;
+        return SignatureVerification {
+            valid: false,
+            expected: Some(expected),
+        };
     };
-    Event::verify_payload(&request, secret.as_bytes())
+    SignatureVerification {
+        valid: Event::verify_payload(&request, secret.as_bytes()),
+        expected: Some(expected),
+    }
+}
+
+fn expected_signature(secret: &str, message_id: &str, timestamp: &str, body: &[u8]) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any length");
+    mac.update(message_id.as_bytes());
+    mac.update(timestamp.as_bytes());
+    mac.update(body);
+    format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
 }
 
 async fn token(
@@ -506,22 +714,19 @@ async fn get_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
 
     #[test]
     fn verifies_hmac_and_rejects_changes() {
         let secret = "0123456789";
         let body = br#"{"event":{}}"#;
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(b"id");
-        mac.update(b"time");
-        mac.update(body);
-        let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
-        assert!(verify_signature(secret, "id", "time", body, &signature));
-        assert!(!verify_signature(
-            secret, "id", "time", b"changed", &signature
-        ));
+        let signature = expected_signature(secret, "id", "time", body);
+        let valid = verify_signature(secret, "id", "time", body, &signature);
+        let invalid = verify_signature(secret, "id", "time", b"changed", &signature);
+
+        assert!(valid.valid);
+        assert_eq!(valid.expected.as_deref(), Some(signature.as_str()));
+        assert!(!invalid.valid);
+        assert_ne!(invalid.expected.as_deref(), Some(signature.as_str()));
     }
 
     #[test]

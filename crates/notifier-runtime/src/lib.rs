@@ -144,22 +144,63 @@ impl EventSink {
         let mut deliveries = Vec::with_capacity(route_ids.len());
         let mut source_plugin = None;
         for route_id in route_ids {
-            let route = self
-                .routes
-                .get(route_id)
-                .with_context(|| format!("source emitted unknown route {route_id:?}"))?;
+            let Some(route) = self.routes.get(route_id) else {
+                debug!(
+                    source_id,
+                    route_id, dedupe_key, "event ingestion rejected unknown route"
+                );
+                bail!("source emitted unknown route {route_id:?}");
+            };
             if route.source_id != source_id {
+                debug!(
+                    source_id,
+                    route_id,
+                    route_source_id = %route.source_id,
+                    dedupe_key,
+                    "event ingestion rejected source ID mismatch"
+                );
                 bail!("source ID mismatch for route {route_id:?}");
             }
             source_plugin = Some(route.source_plugin.as_str());
             let message = render_template(&route.message_template, context)
-                .with_context(|| format!("failed to render route {route_id:?}"))?;
+                .with_context(|| format!("failed to render route {route_id:?}"))
+                .inspect_err(|error| {
+                    debug!(
+                        source_id,
+                        route_id,
+                        source_plugin = %route.source_plugin,
+                        destination_id = %route.destination_id,
+                        dedupe_key,
+                        error = %error,
+                        "event ingestion failed to render route message"
+                    );
+                })?;
             deliveries.push((route_id.clone(), message));
         }
-        let source_plugin = source_plugin.context("source has no routes")?;
+        let source_plugin = source_plugin
+            .context("source has no routes")
+            .inspect_err(|error| {
+                debug!(
+                    source_id,
+                    route_count = route_ids.len(),
+                    dedupe_key,
+                    error = %error,
+                    "event ingestion rejected empty route set"
+                );
+            })?;
         let queued = self
             .storage
-            .enqueue_batch(source_plugin, dedupe_key, &deliveries)?;
+            .enqueue_batch(source_plugin, dedupe_key, &deliveries)
+            .inspect_err(|error| {
+                debug!(
+                    source_id,
+                    source_plugin,
+                    route_count = route_ids.len(),
+                    dedupe_key,
+                    error = %error,
+                    "event ingestion failed to enqueue deliveries"
+                );
+            })?;
         info!(
             source_id,
             source_plugin,
@@ -214,12 +255,25 @@ impl RuntimeBuilder {
             routes = config.routes.len(),
             "checking configuration"
         );
-        config.validate_base()?;
+        config.validate_base().inspect_err(|error| {
+            debug!(
+                sources = config.srcs.len(),
+                destinations = config.dsts.len(),
+                routes = config.routes.len(),
+                error = %error,
+                "rejected base configuration"
+            );
+        })?;
         let mut prepared_sources = HashMap::new();
         for (id, definition) in &config.srcs {
-            self.sources
-                .get(&definition.plugin)
-                .with_context(|| format!("unknown source plugin {:?}", definition.plugin))?;
+            if !self.sources.contains_key(&definition.plugin) {
+                debug!(
+                    source_id = %id,
+                    plugin = %definition.plugin,
+                    "rejected source definition with unknown plugin"
+                );
+                bail!("unknown source plugin {:?}", definition.plugin);
+            }
             prepared_sources.insert(
                 id.clone(),
                 PreparedSource {
@@ -231,9 +285,14 @@ impl RuntimeBuilder {
         }
         let mut prepared_destinations = HashMap::new();
         for (id, definition) in &config.dsts {
-            self.destinations
-                .get(&definition.plugin)
-                .with_context(|| format!("unknown destination plugin {:?}", definition.plugin))?;
+            if !self.destinations.contains_key(&definition.plugin) {
+                debug!(
+                    destination_id = %id,
+                    plugin = %definition.plugin,
+                    "rejected destination definition with unknown plugin"
+                );
+                bail!("unknown destination plugin {:?}", definition.plugin);
+            }
             prepared_destinations.insert(
                 id.clone(),
                 (
@@ -282,7 +341,16 @@ impl RuntimeBuilder {
                 .expect("prepared source plugin must be registered");
             let validated = plugin
                 .validate_spec(&source.spec, &source.route_inputs)
-                .with_context(|| format!("invalid source definition {id:?}"))?;
+                .with_context(|| format!("invalid source definition {id:?}"))
+                .inspect_err(|error| {
+                    debug!(
+                        source_id = %id,
+                        plugin = %source.plugin,
+                        route_count = source.route_inputs.len(),
+                        error = %error,
+                        "rejected source definition"
+                    );
+                })?;
             debug!(
                 source_id = %id,
                 plugin = %source.plugin,
@@ -292,7 +360,16 @@ impl RuntimeBuilder {
             );
             for path in &validated.http_paths {
                 validate_http_path(path)
-                    .with_context(|| format!("invalid webhook path on source {id:?}"))?;
+                    .with_context(|| format!("invalid webhook path on source {id:?}"))
+                    .inspect_err(|error| {
+                        debug!(
+                            source_id = %id,
+                            plugin = %source.plugin,
+                            path,
+                            error = %error,
+                            "rejected source webhook path"
+                        );
+                    })?;
             }
             validated_sources.insert(id.clone(), validated);
         }
@@ -304,7 +381,16 @@ impl RuntimeBuilder {
                 .expect("prepared destination plugin must be registered");
             plugin
                 .validate_spec(&destination.spec, inputs)
-                .with_context(|| format!("invalid destination definition {id:?}"))?;
+                .with_context(|| format!("invalid destination definition {id:?}"))
+                .inspect_err(|error| {
+                    debug!(
+                        destination_id = %id,
+                        plugin = %destination.plugin,
+                        route_count = inputs.len(),
+                        error = %error,
+                        "rejected destination definition"
+                    );
+                })?;
             debug!(
                 destination_id = %id,
                 plugin = %destination.plugin,
@@ -318,7 +404,16 @@ impl RuntimeBuilder {
                 .get(&route.src.id)
                 .expect("source validation must exist");
             validate_template(&route.message, &validated.allowed_template_variables)
-                .with_context(|| format!("invalid message template on route {:?}", route.id))?;
+                .with_context(|| format!("invalid message template on route {:?}", route.id))
+                .inspect_err(|error| {
+                    debug!(
+                        route_id = %route.id,
+                        source_id = %route.src.id,
+                        destination_id = %route.dst.id,
+                        error = %error,
+                        "rejected route message template"
+                    );
+                })?;
         }
 
         let mut active_paths = HashMap::new();
@@ -331,6 +426,12 @@ impl RuntimeBuilder {
                 .expect("source validation must exist");
             for path in &validated.http_paths {
                 if let Some(existing) = active_paths.insert(path.clone(), source_id.clone()) {
+                    debug!(
+                        path,
+                        existing_source_id = %existing,
+                        source_id,
+                        "rejected duplicate active webhook path"
+                    );
                     bail!(
                         "duplicate webhook path {path:?} on sources {existing:?} and {source_id:?}"
                     );
@@ -407,12 +508,26 @@ impl Runtime {
             route_count = self.routes.len(),
             "runtime starting"
         );
-        let storage = Storage::open(&self.config.storage.sqlite_path)?;
+        let storage = Storage::open(&self.config.storage.sqlite_path).inspect_err(|error| {
+            debug!(
+                sqlite_path = %self.config.storage.sqlite_path,
+                error = %error,
+                "failed to open runtime storage"
+            );
+        })?;
         info!(
             sqlite_path = %self.config.storage.sqlite_path,
             "storage opened"
         );
-        storage.recover(&self.routes.keys().cloned().collect::<HashSet<_>>())?;
+        storage
+            .recover(&self.routes.keys().cloned().collect::<HashSet<_>>())
+            .inspect_err(|error| {
+                debug!(
+                    route_count = self.routes.len(),
+                    error = %error,
+                    "failed to recover runtime storage"
+                );
+            })?;
         info!("storage recovery completed");
         let sink = EventSink {
             storage: storage.clone(),
@@ -442,7 +557,16 @@ impl Runtime {
             plugin
                 .reconcile(&context)
                 .await
-                .with_context(|| format!("source {source_id:?} reconciliation failed"))?;
+                .with_context(|| format!("source {source_id:?} reconciliation failed"))
+                .inspect_err(|error| {
+                    debug!(
+                        source_id,
+                        plugin = %source.plugin,
+                        route_count = source.route_inputs.len(),
+                        error = %error,
+                        "source reconciliation failed"
+                    );
+                })?;
             info!(source_id, plugin = %source.plugin, "source reconciled");
             app = app.merge(plugin.router(context.clone()));
         }
@@ -502,16 +626,32 @@ impl Runtime {
             );
             workers.spawn(async move {
                 if let Err(error) = plugin.run(context).await {
+                    debug!(
+                        source_id,
+                        error = %error,
+                        "source background task failed"
+                    );
                     error!(source_id, %error, "source background task exited");
                 }
             });
         }
 
-        let listener = tokio::net::TcpListener::bind(self.config.server.bind).await?;
+        let listener = tokio::net::TcpListener::bind(self.config.server.bind)
+            .await
+            .inspect_err(|error| {
+                debug!(
+                    bind = %self.config.server.bind,
+                    error = %error,
+                    "failed to bind HTTP listener"
+                );
+            })?;
         info!(bind = %self.config.server.bind, "notifier is listening");
         let result = axum::serve(listener, app)
             .await
-            .context("HTTP server failed");
+            .context("HTTP server failed")
+            .inspect_err(|error| {
+                debug!(error = %error, "HTTP server failed");
+            });
         warn!("HTTP server stopped; aborting background workers");
         workers.abort_all();
         result
@@ -534,6 +674,11 @@ async fn delivery_worker(
                 continue;
             }
             Err(error) => {
+                debug!(
+                    worker_id,
+                    error = %error,
+                    "delivery worker failed to claim queued delivery"
+                );
                 error!(worker_id, %error, "failed to claim delivery");
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
@@ -547,16 +692,44 @@ async fn delivery_worker(
             "claimed delivery"
         );
         let Some(route) = routes.get(&delivery.route_id) else {
+            debug!(
+                worker_id,
+                delivery_id = delivery.id,
+                route_id = %delivery.route_id,
+                attempts = delivery.attempts,
+                message_chars = delivery.message.chars().count(),
+                "delivery rejected because route no longer exists"
+            );
             warn!(
                 worker_id,
                 delivery_id = delivery.id,
                 route_id = %delivery.route_id,
                 "delivery route no longer exists"
             );
-            let _ = storage.dead_letter(delivery.id, delivery.attempts, "route no longer exists");
+            if let Err(error) =
+                storage.dead_letter(delivery.id, delivery.attempts, "route no longer exists")
+            {
+                debug!(
+                    worker_id,
+                    delivery_id = delivery.id,
+                    route_id = %delivery.route_id,
+                    error = %error,
+                    "failed to dead-letter delivery with missing route"
+                );
+                error!(worker_id, %error, "failed to dead-letter delivery");
+            }
             continue;
         };
         let Some(destination) = prepared_destinations.get(&route.destination_id) else {
+            debug!(
+                worker_id,
+                delivery_id = delivery.id,
+                route_id = %delivery.route_id,
+                destination_id = %route.destination_id,
+                attempts = delivery.attempts,
+                message_chars = delivery.message.chars().count(),
+                "delivery rejected because destination no longer exists"
+            );
             warn!(
                 worker_id,
                 delivery_id = delivery.id,
@@ -564,14 +737,34 @@ async fn delivery_worker(
                 destination_id = %route.destination_id,
                 "delivery destination no longer exists"
             );
-            let _ = storage.dead_letter(
+            if let Err(error) = storage.dead_letter(
                 delivery.id,
                 delivery.attempts,
                 "destination no longer exists",
-            );
+            ) {
+                debug!(
+                    worker_id,
+                    delivery_id = delivery.id,
+                    route_id = %delivery.route_id,
+                    destination_id = %route.destination_id,
+                    error = %error,
+                    "failed to dead-letter delivery with missing destination"
+                );
+                error!(worker_id, %error, "failed to dead-letter delivery");
+            }
             continue;
         };
         let Some(plugin) = destinations.get(&destination.plugin) else {
+            debug!(
+                worker_id,
+                delivery_id = delivery.id,
+                route_id = %delivery.route_id,
+                destination_id = %route.destination_id,
+                plugin = %destination.plugin,
+                attempts = delivery.attempts,
+                message_chars = delivery.message.chars().count(),
+                "delivery rejected because destination plugin is unavailable"
+            );
             warn!(
                 worker_id,
                 delivery_id = delivery.id,
@@ -580,14 +773,35 @@ async fn delivery_worker(
                 plugin = %destination.plugin,
                 "delivery destination plugin is unavailable"
             );
-            let _ = storage.dead_letter(
+            if let Err(error) = storage.dead_letter(
                 delivery.id,
                 delivery.attempts,
                 "destination plugin is unavailable",
-            );
+            ) {
+                debug!(
+                    worker_id,
+                    delivery_id = delivery.id,
+                    route_id = %delivery.route_id,
+                    destination_id = %route.destination_id,
+                    plugin = %destination.plugin,
+                    error = %error,
+                    "failed to dead-letter delivery with unavailable destination plugin"
+                );
+                error!(worker_id, %error, "failed to dead-letter delivery");
+            }
             continue;
         };
 
+        debug!(
+            worker_id,
+            delivery_id = delivery.id,
+            route_id = %delivery.route_id,
+            destination_id = %route.destination_id,
+            plugin = %destination.plugin,
+            attempts = delivery.attempts,
+            message_chars = delivery.message.chars().count(),
+            "delivering queued message"
+        );
         match plugin
             .deliver(
                 &destination.spec,
@@ -598,6 +812,15 @@ async fn delivery_worker(
         {
             Ok(()) => {
                 if let Err(error) = storage.complete(delivery.id) {
+                    debug!(
+                        worker_id,
+                        delivery_id = delivery.id,
+                        route_id = %delivery.route_id,
+                        destination_id = %route.destination_id,
+                        plugin = %destination.plugin,
+                        error = %error,
+                        "failed to mark delivery complete"
+                    );
                     error!(worker_id, %error, "failed to complete delivery");
                 } else {
                     info!(
@@ -613,6 +836,17 @@ async fn delivery_worker(
             Err(error) => {
                 let attempts = delivery.attempts + 1;
                 let permanent = matches!(error, DeliveryError::Permanent(_));
+                debug!(
+                    worker_id,
+                    delivery_id = delivery.id,
+                    route_id = %delivery.route_id,
+                    destination_id = %route.destination_id,
+                    plugin = %destination.plugin,
+                    attempts,
+                    permanent,
+                    error = error.message(),
+                    "delivery attempt failed"
+                );
                 if permanent || attempts >= max_attempts {
                     warn!(
                         worker_id,
@@ -621,7 +855,21 @@ async fn delivery_worker(
                         error = error.message(),
                         "delivery moved to dead letter"
                     );
-                    let _ = storage.dead_letter(delivery.id, attempts, error.message());
+                    if let Err(storage_error) =
+                        storage.dead_letter(delivery.id, attempts, error.message())
+                    {
+                        debug!(
+                            worker_id,
+                            delivery_id = delivery.id,
+                            route_id = %delivery.route_id,
+                            destination_id = %route.destination_id,
+                            plugin = %destination.plugin,
+                            attempts,
+                            error = %storage_error,
+                            "failed to mark delivery dead"
+                        );
+                        error!(worker_id, %storage_error, "failed to dead-letter delivery");
+                    }
                 } else {
                     let delay = retry_delay(attempts);
                     warn!(
@@ -632,7 +880,22 @@ async fn delivery_worker(
                         error = error.message(),
                         "delivery will be retried"
                     );
-                    let _ = storage.retry(delivery.id, attempts, delay, error.message());
+                    if let Err(storage_error) =
+                        storage.retry(delivery.id, attempts, delay, error.message())
+                    {
+                        debug!(
+                            worker_id,
+                            delivery_id = delivery.id,
+                            route_id = %delivery.route_id,
+                            destination_id = %route.destination_id,
+                            plugin = %destination.plugin,
+                            attempts,
+                            delay,
+                            error = %storage_error,
+                            "failed to reschedule delivery retry"
+                        );
+                        error!(worker_id, %storage_error, "failed to retry delivery");
+                    }
                 }
             }
         }

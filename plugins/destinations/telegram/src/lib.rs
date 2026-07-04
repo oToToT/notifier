@@ -93,11 +93,23 @@ impl DestinationPlugin for TelegramDestination {
     }
 
     fn validate_spec(&self, spec: &Value, inputs: &[RoutePluginInput]) -> Result<()> {
-        parse_spec(spec)?;
+        parse_spec(spec).inspect_err(|error| {
+            debug!(
+                route_count = inputs.len(),
+                error = %error,
+                "rejected Telegram destination configuration"
+            );
+        })?;
         for route in inputs {
-            parse_input(&route.input).with_context(|| {
-                format!("invalid destination input on route {:?}", route.route_id)
-            })?;
+            parse_input(&route.input)
+                .with_context(|| format!("invalid destination input on route {:?}", route.route_id))
+                .inspect_err(|error| {
+                    debug!(
+                        route_id = %route.route_id,
+                        error = %error,
+                        "rejected Telegram destination route input"
+                    );
+                })?;
         }
         debug!(
             route_count = inputs.len(),
@@ -112,10 +124,27 @@ impl DestinationPlugin for TelegramDestination {
         input: &Value,
         message: &str,
     ) -> Result<(), DeliveryError> {
-        let spec = parse_spec(spec).map_err(|error| DeliveryError::permanent(error.to_string()))?;
-        let input =
-            parse_input(input).map_err(|error| DeliveryError::permanent(error.to_string()))?;
+        let spec = parse_spec(spec).map_err(|error| {
+            debug!(
+                error = %error,
+                "rejected Telegram delivery because destination spec is invalid"
+            );
+            DeliveryError::permanent(error.to_string())
+        })?;
+        let input = parse_input(input).map_err(|error| {
+            debug!(
+                error = %error,
+                "rejected Telegram delivery because destination input is invalid"
+            );
+            DeliveryError::permanent(error.to_string())
+        })?;
         if message.chars().count() > 4_096 {
+            debug!(
+                chat_id = %input.chat_id,
+                message_chars = message.chars().count(),
+                max_chars = 4_096,
+                "rejected Telegram delivery because message is too long"
+            );
             warn!(
                 message_chars = message.chars().count(),
                 "rejected Telegram delivery because message is too long"
@@ -124,8 +153,14 @@ impl DestinationPlugin for TelegramDestination {
                 "Telegram message exceeds 4,096 characters",
             ));
         }
-        let chat_id = parse_chat_id(&input.chat_id)
-            .map_err(|error| DeliveryError::permanent(format!("invalid chat ID: {error}")))?;
+        let chat_id = parse_chat_id(&input.chat_id).map_err(|error| {
+            debug!(
+                chat_id = %input.chat_id,
+                error = %error,
+                "rejected Telegram delivery because chat ID could not be parsed"
+            );
+            DeliveryError::permanent(format!("invalid chat ID: {error}"))
+        })?;
         debug!(
             chat_id = %input.chat_id,
             message_chars = message.chars().count(),
@@ -138,7 +173,18 @@ impl DestinationPlugin for TelegramDestination {
                 info!(chat_id = %input.chat_id, "Telegram message sent");
             })
             .map_err(|error| {
+                debug!(
+                    chat_id = %input.chat_id,
+                    raw_error = ?error,
+                    "Telegram provider request failed"
+                );
                 let classified = classify_error(error);
+                debug!(
+                    chat_id = %input.chat_id,
+                    classified_error = classified.message(),
+                    permanent = matches!(classified, DeliveryError::Permanent(_)),
+                    "classified Telegram delivery failure"
+                );
                 warn!(
                     chat_id = %input.chat_id,
                     error = classified.message(),

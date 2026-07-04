@@ -246,8 +246,20 @@ impl SourcePlugin for NitterSource {
     }
 
     fn validate_spec(&self, spec: &Value, inputs: &[RoutePluginInput]) -> Result<ValidatedSource> {
-        parse_spec(spec)?;
-        let users = configured_users(inputs)?;
+        parse_spec(spec).inspect_err(|error| {
+            debug!(
+                route_count = inputs.len(),
+                error = %error,
+                "rejected Nitter source configuration"
+            );
+        })?;
+        let users = configured_users(inputs).inspect_err(|error| {
+            debug!(
+                route_count = inputs.len(),
+                error = %error,
+                "rejected Nitter route input configuration"
+            );
+        })?;
         debug!(
             user_count = users.len(),
             route_count = inputs.len(),
@@ -268,8 +280,21 @@ impl SourcePlugin for NitterSource {
     }
 
     async fn run(&self, context: SourceContext) -> Result<()> {
-        let spec = parse_spec(&context.spec)?;
-        let users = configured_users(&context.route_inputs)?;
+        let spec = parse_spec(&context.spec).inspect_err(|error| {
+            debug!(
+                source_id = %context.source_id,
+                error = %error,
+                "Nitter background task rejected source configuration"
+            );
+        })?;
+        let users = configured_users(&context.route_inputs).inspect_err(|error| {
+            debug!(
+                source_id = %context.source_id,
+                route_count = context.route_inputs.len(),
+                error = %error,
+                "Nitter background task rejected route input configuration"
+            );
+        })?;
         let mut retry_seconds = spec.retry_initial_seconds;
         info!(
             source_id = %context.source_id,
@@ -287,6 +312,13 @@ impl SourcePlugin for NitterSource {
                         successes += 1;
                     }
                     Err(error) => {
+                        debug!(
+                            source_id = %context.source_id,
+                            user,
+                            error = %error,
+                            retry_seconds,
+                            "Nitter user poll failed"
+                        );
                         warn!(
                             source_id = %context.source_id,
                             user,
@@ -332,19 +364,79 @@ async fn poll_user(
     user: &str,
 ) -> Result<()> {
     let rss_url = rss_url(&spec.instance_url, user)?;
-    let body = client
+    debug!(
+        source_id = %context.source_id,
+        user,
+        rss_url = %rss_url,
+        timeout_seconds = spec.request_timeout_seconds,
+        "fetching Nitter RSS"
+    );
+    let response = client
         .get(rss_url.clone())
         .timeout(Duration::from_secs(spec.request_timeout_seconds))
         .send()
         .await
-        .with_context(|| format!("failed to fetch {rss_url}"))?
+        .with_context(|| format!("failed to fetch {rss_url}"))
+        .inspect_err(|error| {
+            debug!(
+                source_id = %context.source_id,
+                user,
+                rss_url = %rss_url,
+                timeout_seconds = spec.request_timeout_seconds,
+                error = %error,
+                "failed to fetch Nitter RSS"
+            );
+        })?;
+    let status = response.status();
+    let body = response
         .error_for_status()
-        .with_context(|| format!("Nitter returned an error for {rss_url}"))?
+        .with_context(|| format!("Nitter returned an error for {rss_url}"))
+        .inspect_err(|error| {
+            debug!(
+                source_id = %context.source_id,
+                user,
+                rss_url = %rss_url,
+                status = %status,
+                error = %error,
+                "Nitter RSS response returned unsuccessful status"
+            );
+        })?
         .bytes()
         .await
-        .with_context(|| format!("failed to read {rss_url} response"))?;
-    let items = parse_feed(&body, spec, user).context("failed to parse Nitter RSS")?;
-    let notified = process_items(context, spec, user, &rss_url, &items)?;
+        .with_context(|| format!("failed to read {rss_url} response"))
+        .inspect_err(|error| {
+            debug!(
+                source_id = %context.source_id,
+                user,
+                rss_url = %rss_url,
+                status = %status,
+                error = %error,
+                "failed to read Nitter RSS response body"
+            );
+        })?;
+    let items = parse_feed(&body, spec, user)
+        .context("failed to parse Nitter RSS")
+        .inspect_err(|error| {
+            debug!(
+                source_id = %context.source_id,
+                user,
+                rss_url = %rss_url,
+                body_bytes = body.len(),
+                body = %String::from_utf8_lossy(&body),
+                error = %error,
+                "failed to parse Nitter RSS"
+            );
+        })?;
+    let notified = process_items(context, spec, user, &rss_url, &items).inspect_err(|error| {
+        debug!(
+            source_id = %context.source_id,
+            user,
+            rss_url = %rss_url,
+            item_count = items.len(),
+            error = %error,
+            "failed to process Nitter RSS items"
+        );
+    })?;
     info!(
         source_id = %context.source_id,
         user,
@@ -363,14 +455,38 @@ fn process_items(
     items: &[TweetItem],
 ) -> Result<usize> {
     let scope = user.to_ascii_lowercase();
-    let route_ids = matching_route_ids(&context.route_inputs, user)?;
+    let route_ids = matching_route_ids(&context.route_inputs, user).inspect_err(|error| {
+        debug!(
+            source_id = %context.source_id,
+            user,
+            configured_routes = context.route_inputs.len(),
+            error = %error,
+            "Nitter processing rejected route input configuration"
+        );
+    })?;
     if route_ids.is_empty() {
+        debug!(
+            source_id = %context.source_id,
+            user,
+            configured_routes = context.route_inputs.len(),
+            item_count = items.len(),
+            "ignored Nitter items because user did not match any configured route"
+        );
         return Ok(0);
     }
 
     let baseline_completed = context
         .storage
-        .source_baseline_completed(&context.source_id, &scope)?;
+        .source_baseline_completed(&context.source_id, &scope)
+        .inspect_err(|error| {
+            debug!(
+                source_id = %context.source_id,
+                user,
+                scope,
+                error = %error,
+                "failed to read Nitter source baseline"
+            );
+        })?;
     let ordered_items = items.iter().rev().collect::<Vec<_>>();
     if !baseline_completed && spec.first_fetch == FirstFetch::MarkSeen {
         let keys = ordered_items
@@ -379,10 +495,29 @@ fn process_items(
             .collect::<Vec<_>>();
         context
             .storage
-            .mark_source_items_seen(&context.source_id, &scope, &keys)?;
+            .mark_source_items_seen(&context.source_id, &scope, &keys)
+            .inspect_err(|error| {
+                debug!(
+                    source_id = %context.source_id,
+                    user,
+                    scope,
+                    key_count = keys.len(),
+                    error = %error,
+                    "failed to mark Nitter baseline items seen"
+                );
+            })?;
         context
             .storage
-            .complete_source_baseline(&context.source_id, &scope)?;
+            .complete_source_baseline(&context.source_id, &scope)
+            .inspect_err(|error| {
+                debug!(
+                    source_id = %context.source_id,
+                    user,
+                    scope,
+                    error = %error,
+                    "failed to complete Nitter source baseline"
+                );
+            })?;
         info!(source_id = %context.source_id, user, count = keys.len(), "Nitter baseline marked seen");
         return Ok(0);
     }
@@ -394,7 +529,17 @@ fn process_items(
             .collect::<Vec<_>>();
         let unseen = context
             .storage
-            .unseen_source_items(&context.source_id, &scope, &keys)?
+            .unseen_source_items(&context.source_id, &scope, &keys)
+            .inspect_err(|error| {
+                debug!(
+                    source_id = %context.source_id,
+                    user,
+                    scope,
+                    key_count = keys.len(),
+                    error = %error,
+                    "failed to query unseen Nitter items"
+                );
+            })?
             .into_iter()
             .collect::<HashSet<_>>();
         ordered_items
@@ -426,10 +571,20 @@ fn process_items(
                 "published_at": item.published_at,
             }
         });
-        let queued =
-            context
-                .sink
-                .ingest(&context.source_id, &route_ids, &event_id, &context_json)?;
+        let queued = context
+            .sink
+            .ingest(&context.source_id, &route_ids, &event_id, &context_json)
+            .inspect_err(|error| {
+                debug!(
+                    source_id = %context.source_id,
+                    user,
+                    tweet_id = %item.id,
+                    route_count = route_ids.len(),
+                    event_id,
+                    error = %error,
+                    "failed to ingest Nitter tweet delivery"
+                );
+            })?;
         info!(
             source_id = %context.source_id,
             user,
@@ -453,11 +608,30 @@ fn process_items(
     };
     context
         .storage
-        .mark_source_items_seen(&context.source_id, &scope, &seen_keys)?;
+        .mark_source_items_seen(&context.source_id, &scope, &seen_keys)
+        .inspect_err(|error| {
+            debug!(
+                source_id = %context.source_id,
+                user,
+                scope,
+                key_count = seen_keys.len(),
+                error = %error,
+                "failed to mark Nitter items seen"
+            );
+        })?;
     if !baseline_completed {
         context
             .storage
-            .complete_source_baseline(&context.source_id, &scope)?;
+            .complete_source_baseline(&context.source_id, &scope)
+            .inspect_err(|error| {
+                debug!(
+                    source_id = %context.source_id,
+                    user,
+                    scope,
+                    error = %error,
+                    "failed to complete Nitter source baseline after notify-existing fetch"
+                );
+            })?;
     }
     Ok(items_to_notify.len())
 }
@@ -472,6 +646,12 @@ fn parse_feed(bytes: &[u8], spec: &Spec, user: &str) -> Result<Vec<TweetItem>> {
             .filter(|value| !value.is_empty())
             .or_else(|| item.link().map(str::trim).filter(|value| !value.is_empty()));
         let Some(key) = key else {
+            debug!(
+                user,
+                title = item.title().unwrap_or_default(),
+                link = item.link().unwrap_or_default(),
+                "ignored Nitter RSS item without GUID or link"
+            );
             continue;
         };
         let original_url = item.link().unwrap_or(key).to_owned();

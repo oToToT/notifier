@@ -73,11 +73,23 @@ impl DestinationPlugin for DiscordDestination {
     }
 
     fn validate_spec(&self, spec: &Value, inputs: &[RoutePluginInput]) -> Result<()> {
-        parse_spec(spec)?;
+        parse_spec(spec).inspect_err(|error| {
+            debug!(
+                route_count = inputs.len(),
+                error = %error,
+                "rejected Discord destination configuration"
+            );
+        })?;
         for route in inputs {
-            parse_input(&route.input).with_context(|| {
-                format!("invalid destination input on route {:?}", route.route_id)
-            })?;
+            parse_input(&route.input)
+                .with_context(|| format!("invalid destination input on route {:?}", route.route_id))
+                .inspect_err(|error| {
+                    debug!(
+                        route_id = %route.route_id,
+                        error = %error,
+                        "rejected Discord destination route input"
+                    );
+                })?;
         }
         debug!(
             route_count = inputs.len(),
@@ -92,10 +104,27 @@ impl DestinationPlugin for DiscordDestination {
         input: &Value,
         message: &str,
     ) -> Result<(), DeliveryError> {
-        let spec = parse_spec(spec).map_err(|error| DeliveryError::permanent(error.to_string()))?;
-        let input =
-            parse_input(input).map_err(|error| DeliveryError::permanent(error.to_string()))?;
+        let spec = parse_spec(spec).map_err(|error| {
+            debug!(
+                error = %error,
+                "rejected Discord delivery because destination spec is invalid"
+            );
+            DeliveryError::permanent(error.to_string())
+        })?;
+        let input = parse_input(input).map_err(|error| {
+            debug!(
+                error = %error,
+                "rejected Discord delivery because destination input is invalid"
+            );
+            DeliveryError::permanent(error.to_string())
+        })?;
         if message.chars().count() > 2_000 {
+            debug!(
+                channel_id = %input.channel_id,
+                message_chars = message.chars().count(),
+                max_chars = 2_000,
+                "rejected Discord delivery because message is too long"
+            );
             warn!(
                 message_chars = message.chars().count(),
                 "rejected Discord delivery because message is too long"
@@ -104,10 +133,14 @@ impl DestinationPlugin for DiscordDestination {
                 "Discord message exceeds 2,000 characters",
             ));
         }
-        let channel_id =
-            ChannelId::new(input.channel_id.parse().map_err(|error| {
-                DeliveryError::permanent(format!("invalid channel ID: {error}"))
-            })?);
+        let channel_id = ChannelId::new(input.channel_id.parse().map_err(|error| {
+            debug!(
+                channel_id = %input.channel_id,
+                error = %error,
+                "rejected Discord delivery because channel ID could not be parsed"
+            );
+            DeliveryError::permanent(format!("invalid channel ID: {error}"))
+        })?);
         let http = Http::new(&spec.bot_token);
         debug!(
             channel_id = %input.channel_id,
@@ -126,7 +159,18 @@ impl DestinationPlugin for DiscordDestination {
                 info!(channel_id = %input.channel_id, "Discord message sent");
             })
             .map_err(|error| {
+                debug!(
+                    channel_id = %input.channel_id,
+                    raw_error = ?error,
+                    "Discord provider request failed"
+                );
                 let classified = classify_error(error);
+                debug!(
+                    channel_id = %input.channel_id,
+                    classified_error = classified.message(),
+                    permanent = matches!(classified, DeliveryError::Permanent(_)),
+                    "classified Discord delivery failure"
+                );
                 warn!(
                     channel_id = %input.channel_id,
                     error = classified.message(),
