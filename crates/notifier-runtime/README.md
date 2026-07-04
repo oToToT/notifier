@@ -2,7 +2,7 @@
 
 `notifier-runtime` is the shared runtime crate for Notifier. It defines the plugin traits,
 configuration model, template validation, Axum integration, SQLite delivery queue, retry
-workers, health endpoints, and JSON Schema generation used by the workspace binaries and
+workers, health endpoints, and JSON Schema generation used by the application binaries and
 plugins.
 
 The crate is designed for compile-time plugin registration. Plugins are ordinary Rust
@@ -172,6 +172,6 @@ Readiness is set only after storage recovery and source reconciliation succeed.
 ## Development
 
 ```sh
-cargo test -p notifier-runtime
-cargo clippy -p notifier-runtime --all-targets -- -D warnings
+cargo test --manifest-path crates/notifier-runtime/Cargo.toml
+cargo clippy --manifest-path crates/notifier-runtime/Cargo.toml --all-targets -- -D warnings
 ```

@@ -1,22 +1,22 @@
 [package]
 name = "notifier-source-twitcasting"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
 
 [dependencies]
-anyhow.workspace = true
-async-trait.workspace = true
-axum.workspace = true
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
 notifier-runtime = { path = "../../../crates/notifier-runtime" }
-schemars.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
-tracing.workspace = true
-twitcasting.workspace = true
-url.workspace = true
+schemars = { version = "1", features = ["derive", "url2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tracing = "0.1"
+twitcasting = "0.2"
+url = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
-tokio.workspace = true
-tower.workspace = true
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }

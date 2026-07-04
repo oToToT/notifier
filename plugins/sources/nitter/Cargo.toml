@@ -1,21 +1,21 @@
 [package]
 name = "notifier-source-nitter"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
 
 [dependencies]
-anyhow.workspace = true
-async-trait.workspace = true
-axum.workspace = true
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
 notifier-runtime = { path = "../../../crates/notifier-runtime" }
-rand.workspace = true
-reqwest.workspace = true
-rss.workspace = true
-schemars.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-url.workspace = true
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rss = "2"
+schemars = { version = "1", features = ["derive", "url2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+url = { version = "2", features = ["serde"] }

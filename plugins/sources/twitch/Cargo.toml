@@ -1,27 +1,27 @@
 [package]
 name = "notifier-source-twitch"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
 
 [dependencies]
-anyhow.workspace = true
-async-trait.workspace = true
-axum.workspace = true
-futures.workspace = true
-hex.workspace = true
-hmac.workspace = true
-http.workspace = true
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+futures = "0.3"
+hex = "0.4"
+hmac = "0.12"
+http = "1"
 notifier-runtime = { path = "../../../crates/notifier-runtime" }
 reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["json", "rustls"] }
-schemars.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
-tracing.workspace = true
-twitch_api.workspace = true
-url.workspace = true
+schemars = { version = "1", features = ["derive", "url2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tracing = "0.1"
+twitch_api = { version = "0.8.0", features = ["eventsub", "helix", "hmac", "reqwest", "twitch_oauth2"] }
+url = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
-tokio.workspace = true
-tower.workspace = true
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }

@@ -1,6 +1,6 @@
 # notifier-server
 
-`notifier-server` is the executable for the Notifier workspace. It links the bundled
+`notifier-server` is the executable for Notifier. It links the bundled
 source and destination plugins at compile time, validates a JSON configuration file,
 reconciles external webhook subscriptions, exposes the webhook HTTP server, and runs
 durable delivery workers.
@@ -12,7 +12,7 @@ This binary currently registers:
 
 ## Commands
 
-Run commands from the workspace root:
+Run commands from the repository root:
 
 ```sh
 cargo run -p notifier-server -- check-config --config config.json
@@ -129,7 +129,7 @@ the configuration file and SQLite database with operating-system permissions.
 ## Development
 
 ```sh
-cargo fmt --check
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```

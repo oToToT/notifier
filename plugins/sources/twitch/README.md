@@ -137,6 +137,6 @@ The bundled `notifier-server` binary already registers this plugin.
 ## Development
 
 ```sh
-cargo test -p notifier-source-twitch
-cargo clippy -p notifier-source-twitch --all-targets -- -D warnings
+cargo test --manifest-path plugins/sources/twitch/Cargo.toml
+cargo clippy --manifest-path plugins/sources/twitch/Cargo.toml --all-targets -- -D warnings
 ```

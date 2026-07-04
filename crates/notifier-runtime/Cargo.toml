@@ -1,25 +1,25 @@
 [package]
 name = "notifier-runtime"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
 
 [dependencies]
-anyhow.workspace = true
-async-trait.workspace = true
-axum.workspace = true
-minijinja.workspace = true
-rand.workspace = true
-regex.workspace = true
-rusqlite.workspace = true
-schemars.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-url.workspace = true
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+minijinja = { version = "2", features = ["builtins", "json"] }
+rand = "0.9"
+regex = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+schemars = { version = "1", features = ["derive", "url2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+url = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
-http-body-util.workspace = true
-tower.workspace = true
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

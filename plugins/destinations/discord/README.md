@@ -96,6 +96,6 @@ The bundled `notifier-server` binary already registers this plugin.
 ## Development
 
 ```sh
-cargo test -p notifier-destination-discord
-cargo clippy -p notifier-destination-discord --all-targets -- -D warnings
+cargo test --manifest-path plugins/destinations/discord/Cargo.toml
+cargo clippy --manifest-path plugins/destinations/discord/Cargo.toml --all-targets -- -D warnings
 ```

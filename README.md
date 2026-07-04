@@ -90,7 +90,10 @@ operating-system permissions.
 ## Development
 
 ```sh
-cargo fmt --check
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+for manifest in $(find crates plugins -name Cargo.toml | sort); do cargo fmt --manifest-path "$manifest" -- --check; done
+for manifest in $(find crates plugins -name Cargo.toml | sort); do cargo clippy --manifest-path "$manifest" --all-targets -- -D warnings; done
+for manifest in $(find crates plugins -name Cargo.toml | sort); do cargo test --manifest-path "$manifest"; done
 ```

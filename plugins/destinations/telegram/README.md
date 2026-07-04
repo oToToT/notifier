@@ -97,6 +97,6 @@ The bundled `notifier-server` binary already registers this plugin.
 ## Development
 
 ```sh
-cargo test -p notifier-destination-telegram
-cargo clippy -p notifier-destination-telegram --all-targets -- -D warnings
+cargo test --manifest-path plugins/destinations/telegram/Cargo.toml
+cargo clippy --manifest-path plugins/destinations/telegram/Cargo.toml --all-targets -- -D warnings
 ```

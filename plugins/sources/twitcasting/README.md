@@ -152,6 +152,6 @@ The bundled `notifier-server` binary already registers this plugin.
 ## Development
 
 ```sh
-cargo test -p notifier-source-twitcasting
-cargo clippy -p notifier-source-twitcasting --all-targets -- -D warnings
+cargo test --manifest-path plugins/sources/twitcasting/Cargo.toml
+cargo clippy --manifest-path plugins/sources/twitcasting/Cargo.toml --all-targets -- -D warnings
 ```
