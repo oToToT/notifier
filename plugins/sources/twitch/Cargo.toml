@@ -9,15 +9,12 @@ anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
 futures = "0.3"
-hex = "0.4"
-hmac = "0.12"
-http = "1"
 notifier-runtime = { path = "../../../crates/notifier-runtime" }
+notifier-webhook = { path = "../../../crates/notifier-webhook" }
 reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["json", "rustls"] }
 schemars = { version = "1", features = ["derive", "url2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
 tracing = "0.1"
 twitch_api = { version = "0.8.0", features = ["eventsub", "helix", "hmac", "reqwest", "twitch_oauth2"] }
 url = { version = "2", features = ["serde"] }

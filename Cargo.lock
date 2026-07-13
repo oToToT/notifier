@@ -1587,18 +1587,32 @@ dependencies = [
  "async-trait",
  "axum",
  "futures",
+ "notifier-runtime",
+ "notifier-webhook",
+ "reqwest 0.13.4",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tracing",
+ "twitch_api",
+ "url",
+]
+
+[[package]]
+name = "notifier-webhook"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
  "hex",
  "hmac",
- "http",
  "notifier-runtime",
- "reqwest 0.13.4",
  "schemars 1.2.1",
  "serde",
  "serde_json",
  "sha2",
  "tracing",
- "twitch_api",
- "url",
 ]
 
 [[package]]
