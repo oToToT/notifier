@@ -1,8 +1,9 @@
 # Notifier
 
-Notifier is a compile-time plugin-based Rust service for routing livestream webhooks to
-text-message destinations. Configuration is loaded once at startup, accepted events are
-stored in SQLite before webhook success is returned, and delivery happens asynchronously.
+Notifier is a compile-time plugin-based Rust service for routing events from various
+sources to text-message destinations. Configuration is loaded once at startup, accepted
+events are stored in SQLite before the source handler reports success, and delivery
+happens asynchronously.
 
 ## Included plugins
 
@@ -26,6 +27,17 @@ provide plugin-defined route-local inputs, such as broadcaster lists or destinat
 IDs, alongside their message templates. Multiple routes can reuse either side; each
 referenced source is reconciled once.
 
+The runtime is generic: sources can be webhook-based, polling-based, or long-running
+background tasks, and destinations can be any message channel. New plugins are added at
+compile time by implementing `SourcePlugin` or `DestinationPlugin` and registering them in
+the `RuntimeBuilder`.
+
+For webhook sources, `crates/notifier-webhook` offers optional helpers such as a unified
+Axum dispatcher, HMAC verification, SHA-256 deduplication utilities, and common spec
+fragments. It is not required; you may build a webhook source from scratch or use your own
+libraries. We welcome contributions of additional generic helper crates, new plugins, and
+any other improvements.
+
 ## Commands
 
 ```sh
@@ -39,7 +51,7 @@ restart. Route IDs must be unique and should remain stable across restarts.
 
 The server exposes:
 
-- One configured `POST` path per active Twitch or TwitCasting source
+- One configured `POST` path per active webhook-based source
 - `GET /health`
 - `GET /ready`
 
@@ -47,8 +59,9 @@ Readiness is enabled only after all configured source subscriptions reconcile su
 Reconciliation creates missing subscriptions; it does not delete provider subscriptions that
 are absent from the file. Twitch callback URLs are built from `public_base_url` and the
 source's `webhook_path`. The TwitCasting application's callback URL must be configured
-separately to the same full URL. Nitter sources do not block readiness on RSS availability;
-fetch errors are logged and retried in the background.
+separately to the same full URL. Polling sources such as Nitter do not expose webhook
+paths; they run background tasks that are started after reconciliation and do not block
+readiness on fetch availability.
 
 ## Templates
 
@@ -67,7 +80,7 @@ Optional `tweet_url_base` rewrites notification links while leaving fetches on
 `https://x.com`. The default `first_fetch` mode is `mark_seen`; setting
 `first_fetch` to `notify_existing` may send every item currently present in the RSS feed.
 
-Messages are rendered during webhook ingestion and the rendered text is stored, making
+Messages are rendered during event ingestion and the rendered text is stored, making
 retries deterministic. V1 sends plain text only. Provider length limits are permanent
 failures; content is never silently truncated.
 
