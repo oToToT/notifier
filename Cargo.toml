@@ -4,6 +4,7 @@ members = [
 ]
 exclude = [
     "crates/notifier-runtime",
+    "crates/notifier-webhook",
     "plugins/destinations/discord",
     "plugins/destinations/telegram",
     "plugins/sources/nitter",

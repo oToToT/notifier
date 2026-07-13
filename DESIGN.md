@@ -25,6 +25,12 @@ The workspace contains:
 
 - `crates/notifier-runtime`: plugin traits, configuration, templates, HTTP integration, SQLite
   persistence, workers, retries, health checks, and schema generation.
+- `crates/notifier-webhook`: shared utilities for webhook-style source plugins. Provides a
+  `WebhookProvider` trait, unified Axum dispatch (HTTP 401 on bad signatures, 204 on
+  ingested/ignored events, 200 on Twitch challenge verification and revocation acks),
+  broadcaster matchers, a common spec fragment, HMAC verification, and SHA-256 dedupe key
+  helpers. Plugins opt in by implementing `WebhookProvider` and wrapping it in
+  `WebhookSource<P>`.
 - `plugins/sources/nitter`: Nitter RSS polling using `reqwest` and `rss`.
 - `plugins/sources/twitch`: Twitch EventSub handling using `twitch_api`.
 - `plugins/sources/twitcasting`: TwitCasting API and webhook handling using `twitcasting`.
