@@ -18,8 +18,8 @@ At webhook time, the plugin:
 
 - Decodes the TwitCasting webhook payload.
 - Accepts only `livestart` events.
-- Compares the payload signature with the configured application signature.
-- Ensures the payload broadcaster matches at least one route input.
+- Compares the payload broadcaster with route inputs (signature verification is not
+  supported because TwitCasting does not document a verification algorithm).
 - Ensures the movie belongs to that broadcaster.
 - Enqueues one rendered delivery per matching route through `notifier-runtime`.
 
@@ -42,8 +42,7 @@ Use this plugin in the `srcs` map, then provide route-local broadcaster inputs f
       "spec": {
         "webhook_path": "/hooks/twitcasting-example",
         "client_id": "your-twitcasting-client-id",
-        "client_secret": "your-twitcasting-client-secret",
-        "webhook_signature": "application-webhook-signature"
+        "client_secret": "your-twitcasting-client-secret"
       }
     }
   },
@@ -71,7 +70,6 @@ Spec fields:
 - `webhook_path`: static absolute HTTP path served by Notifier.
 - `client_id`: TwitCasting application client ID.
 - `client_secret`: TwitCasting application client secret.
-- `webhook_signature`: application webhook signature expected in webhook payloads.
 - `api_base_url`: optional API base URL, default `https://apiv2.twitcasting.tv`.
 
 Route input fields:

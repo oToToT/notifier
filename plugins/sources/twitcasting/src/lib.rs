@@ -44,7 +44,6 @@ struct Spec {
     webhook_path: String,
     client_id: String,
     client_secret: String,
-    webhook_signature: String,
     #[serde(default = "default_api_base_url")]
     api_base_url: String,
 }
@@ -98,7 +97,6 @@ fn parse_spec(value: &Value) -> Result<Spec> {
     for (name, value) in [
         ("client_id", &spec.client_id),
         ("client_secret", &spec.client_secret),
-        ("webhook_signature", &spec.webhook_signature),
     ] {
         if value.trim().is_empty() {
             bail!("{name} cannot be empty");
@@ -318,12 +316,12 @@ async fn webhook(State(state): State<WebhookState>, body: Bytes) -> Response {
 }
 
 fn handle_webhook(state: &WebhookState, body: WebhookPayload) -> Result<()> {
-    let (signature, movie, broadcaster) = match body {
+    let (movie, broadcaster) = match body {
         WebhookPayload::LiveStart {
-            signature,
             movie,
             broadcaster,
-        } => (signature, movie, broadcaster),
+            ..
+        } => (movie, broadcaster),
         WebhookPayload::LiveEnd {
             movie, broadcaster, ..
         } => {
@@ -378,13 +376,6 @@ fn handle_webhook(state: &WebhookState, body: WebhookPayload) -> Result<()> {
             return Ok(());
         }
     };
-    let spec = parse_spec(&state.context.spec).inspect_err(|error| {
-        debug!(
-            source_id = %state.context.source_id,
-            error = %error,
-            "TwitCasting webhook rejected source configuration"
-        );
-    })?;
     let route_ids = matching_route_ids(&state.context.route_inputs, broadcaster.screen_id.as_str())
         .inspect_err(|error| {
             debug!(
@@ -397,27 +388,6 @@ fn handle_webhook(state: &WebhookState, body: WebhookPayload) -> Result<()> {
                 "TwitCasting webhook rejected route input configuration"
             );
         })?;
-    if spec.webhook_signature != signature.expose_secret() {
-        debug!(
-            source_id = %state.context.source_id,
-            broadcaster_id = %broadcaster.id,
-            broadcaster_screen_id = %broadcaster.screen_id,
-            movie_id = %movie.id,
-            expected_signature = %spec.webhook_signature,
-            received_signature = %signature.expose_secret(),
-            expected_signature_len = spec.webhook_signature.len(),
-            received_signature_len = signature.expose_secret().len(),
-            "TwitCasting webhook signature mismatch details"
-        );
-        warn!(
-            source_id = %state.context.source_id,
-            broadcaster_id = %broadcaster.id,
-            broadcaster_screen_id = %broadcaster.screen_id,
-            movie_id = %movie.id,
-            "rejected TwitCasting webhook with invalid signature"
-        );
-        bail!("signature did not match");
-    }
     if route_ids.is_empty() {
         debug!(
             source_id = %state.context.source_id,
@@ -545,7 +515,6 @@ mod tests {
             webhook_path: "/hooks/twitcasting".into(),
             client_id: "client".into(),
             client_secret: "secret".into(),
-            webhook_signature: "signature".into(),
             api_base_url: default_api_base_url(),
         };
         let validated = TwitCastingSource::new()
@@ -565,8 +534,7 @@ mod tests {
         let spec = serde_json::json!({
             "webhook_path": "/hooks/twitcasting",
             "client_id": "client",
-            "client_secret": "secret",
-            "webhook_signature": "signature"
+            "client_secret": "secret"
         });
         let error = TwitCastingSource::new()
             .validate_spec(
