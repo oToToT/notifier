@@ -18,8 +18,10 @@ At webhook time, the plugin:
 
 - Decodes the TwitCasting webhook payload.
 - Accepts only `livestart` events.
-- Compares the payload broadcaster with route inputs (signature verification is not
-  supported because TwitCasting does not document a verification algorithm).
+- Compares the payload broadcaster with route inputs.
+- Verifies the payload signature against the configured `webhook_signature`.
+  Mismatches are rejected when `enforce_signature_verification` is enabled;
+  otherwise they are logged and the webhook is processed.
 - Ensures the movie belongs to that broadcaster.
 - Enqueues one rendered delivery per matching route through `notifier-runtime`.
 
@@ -42,7 +44,9 @@ Use this plugin in the `srcs` map, then provide route-local broadcaster inputs f
       "spec": {
         "webhook_path": "/hooks/twitcasting-example",
         "client_id": "your-twitcasting-client-id",
-        "client_secret": "your-twitcasting-client-secret"
+        "client_secret": "your-twitcasting-client-secret",
+        "webhook_signature": "your-twitcasting-webhook-signature",
+        "enforce_signature_verification": true
       }
     }
   },
@@ -70,6 +74,12 @@ Spec fields:
 - `webhook_path`: static absolute HTTP path served by Notifier.
 - `client_id`: TwitCasting application client ID.
 - `client_secret`: TwitCasting application client secret.
+- `webhook_signature`: required non-empty string value from the TwitCasting developer
+  dashboard (under "WebHook Signature").
+- `enforce_signature_verification`: optional boolean, default `true`. A signature
+  mismatch is logged as a warning, with the full request body at debug level, and
+  is accepted when `false`. When `true`, a mismatch is logged as an error and
+  rejected with HTTP 401.
 - `api_base_url`: optional API base URL, default `https://apiv2.twitcasting.tv`.
 
 Route input fields:

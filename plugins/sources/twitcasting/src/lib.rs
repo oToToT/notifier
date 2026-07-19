@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use axum::{Router, body::Bytes, http::HeaderMap};
 use notifier_runtime::{
@@ -11,10 +11,10 @@ use notifier_webhook::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use twitcasting::{
-    AppAuth, Client, ScreenId, UserRef, WebhookEvent, WebhookEvents, WebhookListRequest,
-    WebhookPayload, decode_webhook,
+    AppAuth, Client, ScreenId, SecretString, UserRef, WebhookEvent, WebhookEvents,
+    WebhookListRequest, WebhookPayload, decode_webhook,
 };
 use url::Url;
 
@@ -65,12 +65,19 @@ pub struct TwitCastingProvider;
 pub struct TwitCastingSpec {
     #[serde(flatten)]
     pub common: CommonSpec,
+    pub webhook_signature: String,
+    #[serde(default = "default_enforce_signature_verification")]
+    pub enforce_signature_verification: bool,
     #[serde(default = "default_api_base_url")]
     pub api_base_url: String,
 }
 
 fn default_api_base_url() -> String {
     "https://apiv2.twitcasting.tv".into()
+}
+
+fn default_enforce_signature_verification() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -138,30 +145,35 @@ impl WebhookProvider for TwitCastingProvider {
         let spec: TwitCastingSpec =
             serde_json::from_value(value.clone()).context("invalid TwitCasting spec")?;
         validate_common_spec(&spec.common).context("invalid TwitCasting spec")?;
+        if spec.webhook_signature.trim().is_empty() {
+            bail!("webhook_signature cannot be empty");
+        }
         Ok(spec)
     }
 
     async fn parse(
         &self,
-        _spec: &Self::Spec,
+        spec: &Self::Spec,
         _headers: &HeaderMap,
         body: &Bytes,
     ) -> Result<Self::Event, WebhookError> {
-        decode_webhook(body)
+        let payload = decode_webhook(body)
             .context("invalid TwitCasting webhook")
             .map_err(|error| {
                 debug!(
                     body_bytes = body.len(),
                     body = %String::from_utf8_lossy(body),
                     error = %error,
-                    "TwitCasting webhook decode or signature failure details"
+                    "TwitCasting webhook decode failure details"
                 );
                 warn!(
                     body_bytes = body.len(),
-                    "rejected TwitCasting webhook with invalid signature"
+                    "rejected undecodable TwitCasting webhook"
                 );
-                WebhookError::Unauthorized
-            })
+                WebhookError::BadRequest(error.to_string())
+            })?;
+        verify_signature(spec, &payload, body)?;
+        Ok(payload)
     }
 
     async fn dispatch(
@@ -395,6 +407,50 @@ impl WebhookProvider for TwitCastingProvider {
     }
 }
 
+fn payload_signature(payload: &WebhookPayload) -> Option<&SecretString> {
+    match payload {
+        WebhookPayload::LiveStart { signature, .. }
+        | WebhookPayload::LiveEnd { signature, .. }
+        | WebhookPayload::LiveScheduleCreate { signature, .. }
+        | WebhookPayload::LiveScheduleUpdate { signature, .. }
+        | WebhookPayload::LiveScheduleDelete { signature, .. } => Some(signature),
+        WebhookPayload::Unknown { signature, .. } => signature.as_ref(),
+    }
+}
+
+fn verify_signature(
+    spec: &TwitCastingSpec,
+    payload: &WebhookPayload,
+    body: &Bytes,
+) -> Result<(), WebhookError> {
+    let received = payload_signature(payload).map(SecretString::expose_secret);
+    if received == Some(spec.webhook_signature.as_str()) {
+        debug!("TwitCasting webhook signature verified");
+        return Ok(());
+    }
+
+    if spec.enforce_signature_verification {
+        error!(
+            body_bytes = body.len(),
+            has_signature = received.is_some(),
+            "rejected TwitCasting webhook with invalid signature"
+        );
+        return Err(WebhookError::Unauthorized);
+    }
+
+    debug!(
+        body_bytes = body.len(),
+        body = %String::from_utf8_lossy(body),
+        "TwitCasting webhook signature mismatch request body"
+    );
+    warn!(
+        body_bytes = body.len(),
+        has_signature = received.is_some(),
+        "TwitCasting webhook signature mismatch (processing anyway)"
+    );
+    Ok(())
+}
+
 fn client(spec: &TwitCastingSpec) -> Result<Client<AppAuth>> {
     let auth = AppAuth::new(
         spec.common.client_id.clone(),
@@ -440,8 +496,52 @@ mod tests {
         serde_json::json!({
             "webhook_path": "/hooks/twitcasting",
             "client_id": "client",
-            "client_secret": "secret"
+            "client_secret": "secret",
+            "webhook_signature": "expected-signature"
         })
+    }
+
+    #[test]
+    fn requires_nonempty_webhook_signature() {
+        let mut missing = spec_value();
+        missing.as_object_mut().unwrap().remove("webhook_signature");
+        let error = TwitCastingSource::new()
+            .validate_spec(&missing, &[])
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("webhook_signature"));
+
+        let mut empty = spec_value();
+        empty["webhook_signature"] = "  ".into();
+        let error = TwitCastingSource::new()
+            .validate_spec(&empty, &[])
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("webhook_signature cannot be empty"));
+    }
+
+    #[tokio::test]
+    async fn signature_mismatch_is_allowed_when_enforcement_is_disabled() {
+        let mut value = spec_value();
+        value["enforce_signature_verification"] = false.into();
+        let spec = TwitCastingProvider.parse_spec(&value).unwrap();
+        let body = Bytes::from_static(br#"{"event":"future","signature":"unexpected-signature"}"#);
+
+        assert!(
+            TwitCastingProvider
+                .parse(&spec, &HeaderMap::new(), &body)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn signature_mismatch_is_rejected_by_default() {
+        let spec = TwitCastingProvider.parse_spec(&spec_value()).unwrap();
+        let body = Bytes::from_static(br#"{"event":"future","signature":"unexpected-signature"}"#);
+
+        let result = TwitCastingProvider
+            .parse(&spec, &HeaderMap::new(), &body)
+            .await;
+        assert!(matches!(result, Err(WebhookError::Unauthorized)));
     }
 
     #[test]
