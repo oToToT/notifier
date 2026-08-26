@@ -11,7 +11,7 @@ axum = "0.8"
 futures = "0.3"
 notifier-runtime = { path = "../../../crates/notifier-runtime" }
 notifier-webhook = { path = "../../../crates/notifier-webhook" }
-reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 schemars = { version = "1", features = ["derive", "url2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

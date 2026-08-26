@@ -1,6 +1,6 @@
 [package]
 name = "notifier-destination-discord"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 
@@ -11,5 +11,5 @@ notifier-runtime = { path = "../../../crates/notifier-runtime" }
 schemars = { version = "1", features = ["derive", "url2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serenity = { version = "0.12.5", default-features = false, features = ["builder", "http", "model", "rustls_backend"] }
+serenity = { git = "https://github.com/serenity-rs/serenity.git", branch = "next", default-features = false, features = ["builder", "http", "model", "rustls_backend"] }
 tracing = "0.1"

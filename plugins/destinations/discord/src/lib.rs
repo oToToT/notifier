@@ -11,6 +11,7 @@ use serenity::{
     builder::{CreateAllowedMentions, CreateMessage},
     http::{Http, HttpError},
     model::id::ChannelId,
+    secrets::Token,
 };
 use tracing::{debug, info, warn};
 
@@ -140,8 +141,16 @@ impl DestinationPlugin for DiscordDestination {
                 "rejected Discord delivery because channel ID could not be parsed"
             );
             DeliveryError::permanent(format!("invalid channel ID: {error}"))
-        })?);
-        let http = Http::new(&spec.bot_token);
+        })?)
+        .widen();
+        let token = spec.bot_token.parse::<Token>().map_err(|error| {
+            debug!(
+                error = %error,
+                "rejected Discord delivery because the bot token is malformed"
+            );
+            DeliveryError::permanent(error.to_string())
+        })?;
+        let http = Http::new(token);
         debug!(
             channel_id = %input.channel_id,
             message_chars = message.chars().count(),

@@ -1,4 +1,4 @@
-use std::{collections::HashSet, io::Cursor, time::Duration};
+use std::{collections::HashSet, fmt::Write as _, io::Cursor, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -6,7 +6,7 @@ use axum::Router;
 use notifier_runtime::{
     PluginMetadata, RoutePluginInput, SourceContext, SourcePlugin, ValidatedSource, schema_value,
 };
-use rand::Rng;
+use rand::RngExt;
 use rss::Channel;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -715,10 +715,12 @@ fn profile_url(base_url: &Url, user: &str) -> Result<Url> {
 }
 
 fn stable_event_id(source_id: &str, user: &str, key: &str) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(format!("nitter\0{source_id}\0{user}\0{key}").as_bytes())
-    )
+    let digest = Sha256::digest(format!("nitter\0{source_id}\0{user}\0{key}").as_bytes());
+    let mut event_id = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(event_id, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    event_id
 }
 
 fn jittered_delay(base_seconds: u64, max_seconds: u64) -> u64 {

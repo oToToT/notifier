@@ -62,7 +62,7 @@ impl SourcePlugin for TwitchSource {
 
 #[derive(Clone, Default)]
 pub struct TwitchProvider {
-    client: TwitchClient<'static, reqwest13::Client>,
+    client: TwitchClient<'static, reqwest::Client>,
 }
 
 impl TwitchProvider {
@@ -564,7 +564,7 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, Webhook
 }
 
 async fn token(
-    client: &TwitchClient<'static, reqwest13::Client>,
+    client: &TwitchClient<'static, reqwest::Client>,
     spec: &TwitchSpec,
 ) -> Result<AppAccessToken> {
     AppAccessToken::get_app_access_token(
@@ -578,7 +578,7 @@ async fn token(
 }
 
 async fn resolve_user(
-    client: &TwitchClient<'static, reqwest13::Client>,
+    client: &TwitchClient<'static, reqwest::Client>,
     broadcaster: &str,
     token: &AppAccessToken,
 ) -> Result<twitch_api::helix::users::User> {
@@ -590,7 +590,7 @@ async fn resolve_user(
 }
 
 async fn get_stream(
-    client: &TwitchClient<'static, reqwest13::Client>,
+    client: &TwitchClient<'static, reqwest::Client>,
     token: &AppAccessToken,
     user_id: &str,
 ) -> Result<twitch_api::helix::streams::Stream> {
