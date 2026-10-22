@@ -113,6 +113,11 @@ rows.
 Delivery is at least once. If a destination accepts a request but the response is lost, a
 retry can produce a duplicate destination message.
 
+Each delivery attempt has a deadline controlled by `delivery.attempt_timeout_seconds`
+(default `60`, must be positive). A timed-out attempt is retried through SQLite so a
+stalled provider cannot occupy a worker indefinitely. A timeout can also produce a
+duplicate if the provider accepted the message before the response was lost.
+
 ## Logging
 
 Logging uses `tracing-subscriber` and defaults to `info`. Set `server.log_level` in

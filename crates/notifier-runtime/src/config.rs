@@ -44,6 +44,7 @@ pub struct StorageConfig {
 pub struct DeliveryConfig {
     pub workers: usize,
     pub max_attempts: u32,
+    pub attempt_timeout_seconds: u64,
 }
 
 impl Default for DeliveryConfig {
@@ -51,6 +52,7 @@ impl Default for DeliveryConfig {
         Self {
             workers: 4,
             max_attempts: 8,
+            attempt_timeout_seconds: 60,
         }
     }
 }
@@ -125,6 +127,9 @@ impl Config {
         if self.delivery.max_attempts == 0 {
             debug!("rejected configuration because delivery.max_attempts is zero");
             bail!("delivery.max_attempts must be greater than zero");
+        }
+        if self.delivery.attempt_timeout_seconds == 0 {
+            bail!("delivery.attempt_timeout_seconds must be greater than zero");
         }
         if self.server.public_base_url.scheme() != "http"
             && self.server.public_base_url.scheme() != "https"
@@ -224,6 +229,22 @@ impl Config {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn delivery_timeout_defaults_and_rejects_zero() {
+        let delivery: DeliveryConfig =
+            serde_json::from_value(json!({"workers": 2, "max_attempts": 3})).unwrap();
+        assert_eq!(delivery.attempt_timeout_seconds, 60);
+        let mut config = config();
+        config.delivery.attempt_timeout_seconds = 0;
+        assert!(
+            config
+                .validate_base()
+                .unwrap_err()
+                .to_string()
+                .contains("attempt_timeout_seconds")
+        );
+    }
 
     fn config() -> Config {
         let plugin = PluginConfig {

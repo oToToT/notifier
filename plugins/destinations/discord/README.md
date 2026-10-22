@@ -5,6 +5,10 @@ messages to a Discord channel using `serenity`.
 
 The plugin name used in Notifier configuration is `discord`.
 
+API requests share an HTTP client with a 10-second connection timeout and a
+30-second total request timeout. The runtime also bounds the entire delivery attempt
+(including SDK rate-limit waits) using `delivery.attempt_timeout_seconds`.
+
 ## What it does
 
 For each delivery, the plugin:

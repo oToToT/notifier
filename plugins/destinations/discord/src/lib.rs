@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use notifier_runtime::{
@@ -9,18 +11,26 @@ use serde_json::Value;
 use serenity::{
     Error as SerenityError,
     builder::{CreateAllowedMentions, CreateMessage},
-    http::{Http, HttpError},
+    http::{HttpBuilder, HttpError},
     model::id::ChannelId,
     secrets::Token,
 };
 use tracing::{debug, info, warn};
 
 #[derive(Clone)]
-pub struct DiscordDestination {}
+pub struct DiscordDestination {
+    client: reqwest::Client,
+}
 
 impl DiscordDestination {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("failed to build Discord HTTP client"),
+        }
     }
 }
 
@@ -150,7 +160,7 @@ impl DestinationPlugin for DiscordDestination {
             );
             DeliveryError::permanent(error.to_string())
         })?;
-        let http = Http::new(token);
+        let http = HttpBuilder::new(token).client(self.client.clone()).build();
         debug!(
             channel_id = %input.channel_id,
             message_chars = message.chars().count(),

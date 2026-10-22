@@ -21,5 +21,6 @@ tracing = "0.1"
 url = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

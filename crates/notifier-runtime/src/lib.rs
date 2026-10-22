@@ -613,6 +613,7 @@ impl Runtime {
                 self.destinations.clone(),
                 self.prepared_destinations.clone(),
                 self.config.delivery.max_attempts,
+                self.config.delivery.attempt_timeout_seconds,
             ));
         }
         for (source_id, source) in &self.prepared_sources {
@@ -676,6 +677,7 @@ async fn delivery_worker(
     destinations: HashMap<String, Arc<dyn DestinationPlugin>>,
     prepared_destinations: HashMap<String, PreparedDestination>,
     max_attempts: u32,
+    attempt_timeout_seconds: u64,
 ) {
     loop {
         let delivery = match storage.claim() {
@@ -813,14 +815,21 @@ async fn delivery_worker(
             message_chars = delivery.message.chars().count(),
             "delivering queued message"
         );
-        match plugin
-            .deliver(
+        let result = tokio::time::timeout(
+            Duration::from_secs(attempt_timeout_seconds),
+            plugin.deliver(
                 &destination.spec,
                 &route.destination_input,
                 &delivery.message,
-            )
-            .await
-        {
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(DeliveryError::transient(format!(
+                "delivery attempt timed out after {attempt_timeout_seconds} seconds"
+            )))
+        });
+        match result {
             Ok(()) => {
                 if let Err(error) = storage.complete(delivery.id) {
                     debug!(
@@ -1080,6 +1089,58 @@ mod tests {
         assert_eq!(delivery_retry_delay(1, &fractional), 121);
         let short = DeliveryError::retry_after("rate limited", Duration::from_secs(1));
         assert!(delivery_retry_delay(5, &short) >= 32);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_delivery_is_requeued_and_the_worker_continues() {
+        struct SlowDestination;
+        #[async_trait]
+        impl DestinationPlugin for SlowDestination {
+            fn metadata(&self) -> PluginMetadata {
+                TestDestination.metadata()
+            }
+            fn validate_spec(&self, _: &Value, _: &[RoutePluginInput]) -> Result<()> {
+                Ok(())
+            }
+            async fn deliver(
+                &self,
+                _: &Value,
+                _: &Value,
+                message: &str,
+            ) -> Result<(), DeliveryError> {
+                if message == "hang" {
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            }
+        }
+        let runtime = RuntimeBuilder::new()
+            .source(TestSource)
+            .destination(SlowDestination)
+            .check_config(test_config("test-source"))
+            .unwrap();
+        let storage = Storage::open(":memory:").unwrap();
+        storage
+            .enqueue("test-source", "first", "route", "hang")
+            .unwrap();
+        let first = storage.claim().unwrap().unwrap();
+        storage.recover(&HashSet::from(["route".into()])).unwrap();
+        storage
+            .enqueue("test-source", "second", "route", "hello")
+            .unwrap();
+        let worker = tokio::spawn(delivery_worker(
+            0,
+            storage.clone(),
+            runtime.routes,
+            runtime.destinations,
+            runtime.prepared_destinations,
+            8,
+            5,
+        ));
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        assert_eq!(storage.state(first.id).unwrap(), "queued");
+        assert_eq!(storage.state(first.id + 1).unwrap(), "delivered");
+        worker.abort();
     }
 
     #[test]

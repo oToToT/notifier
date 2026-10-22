@@ -112,6 +112,8 @@ dead-letter state.
 - `storage.sqlite_path`: SQLite database path.
 - `delivery.workers`: number of delivery workers, default `4`.
 - `delivery.max_attempts`: retry attempt limit, default `8`.
+- `delivery.attempt_timeout_seconds`: positive deadline for each complete delivery
+  attempt, default `60`. Timeouts are transient failures and return to the queue.
 - `srcs`: reusable source plugin instances.
 - `dsts`: reusable destination plugin instances.
 - `routes`: source-to-destination routes with `src.id`, `src.input`, `dst.id`, `dst.input`,
