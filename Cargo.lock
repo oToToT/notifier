@@ -1699,7 +1699,7 @@ dependencies = [
 
 [[package]]
 name = "notifier-destination-discord"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1714,7 +1714,7 @@ dependencies = [
 
 [[package]]
 name = "notifier-destination-telegram"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1728,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "notifier-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1748,7 +1748,7 @@ dependencies = [
 
 [[package]]
 name = "notifier-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1766,7 +1766,7 @@ dependencies = [
 
 [[package]]
 name = "notifier-source-nitter"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "notifier-source-twitcasting"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1804,7 +1804,7 @@ dependencies = [
 
 [[package]]
 name = "notifier-source-twitch"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1823,7 +1823,7 @@ dependencies = [
 
 [[package]]
 name = "notifier-webhook"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
