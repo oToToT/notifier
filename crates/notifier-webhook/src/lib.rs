@@ -10,6 +10,7 @@ mod dedupe;
 mod dispatcher;
 mod hmac;
 mod input;
+mod reconciliation;
 mod spec;
 
 pub use dedupe::dedupe_sha256;
@@ -22,4 +23,5 @@ pub use input::{
     BroadcasterInput, BroadcasterValidator, configured_broadcasters, matching_route_ids,
     parse_broadcaster_input, validate_broadcasters,
 };
+pub use reconciliation::ReconciliationRetry;
 pub use spec::{CommonSpec, validate_common_spec};

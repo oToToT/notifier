@@ -1,4 +1,4 @@
-use std::{collections::HashSet, future::Future, sync::Mutex, time::Duration};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -7,10 +7,10 @@ use notifier_runtime::{
     PluginMetadata, RoutePluginInput, SourceContext, SourcePlugin, ValidatedSource, schema_value,
 };
 use notifier_webhook::{
-    BroadcasterValidator, CommonSpec, WebhookError, WebhookOutcome, WebhookProvider, WebhookSource,
-    configured_broadcasters, dedupe_sha256, matching_route_ids, validate_common_spec,
+    BroadcasterValidator, CommonSpec, ReconciliationRetry, WebhookError, WebhookOutcome,
+    WebhookProvider, WebhookSource, configured_broadcasters, dedupe_sha256, matching_route_ids,
+    validate_common_spec,
 };
-use rand::RngExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -21,32 +21,19 @@ use twitcasting::{
 };
 use url::Url;
 
-pub struct TwitCastingSource(
-    pub WebhookSource<TwitCastingProvider>,
-    Mutex<HashSet<String>>,
-);
+pub struct TwitCastingSource(pub WebhookSource<TwitCastingProvider>, ReconciliationRetry);
 
 impl TwitCastingSource {
     pub fn new() -> Self {
-        Self(WebhookSource::new(TwitCastingProvider), Mutex::default())
+        Self(
+            WebhookSource::new(TwitCastingProvider),
+            ReconciliationRetry::default(),
+        )
     }
 
     fn finish_reconciliation(&self, source_id: &str, result: Result<()>) -> Result<()> {
-        match result {
-            Err(error) if is_transient(&error) => {
-                self.1.lock().unwrap().insert(source_id.to_owned());
-                warn!(
-                    source_id,
-                    error = %format!("{error:#}"),
-                    "TwitCasting reconciliation deferred; serving webhooks while registration retries in the background"
-                );
-                Ok(())
-            }
-            result => {
-                self.1.lock().unwrap().remove(source_id);
-                result
-            }
-        }
+        self.1
+            .record_result(source_id, "twitcasting", result, is_transient)
     }
 }
 
@@ -77,11 +64,14 @@ impl SourcePlugin for TwitCastingSource {
         self.finish_reconciliation(&context.source_id, self.0.reconcile(context).await)
     }
     async fn run(&self, context: SourceContext) -> Result<()> {
-        let pending = self.1.lock().unwrap().remove(&context.source_id);
-        if pending {
-            retry_reconciliation(&context.source_id, || self.0.reconcile(&context)).await?;
-        }
-        Ok(())
+        self.1
+            .recover(
+                &context.source_id,
+                "twitcasting",
+                || self.0.reconcile(&context),
+                is_transient,
+            )
+            .await
     }
 }
 
@@ -99,47 +89,6 @@ fn is_transient(error: &anyhow::Error) -> bool {
             twitcasting::Error::Decode { .. } | twitcasting::Error::UnexpectedContentType { .. },
         ) => true,
         _ => false,
-    }
-}
-
-fn reconciliation_retry_delay(attempt: u32) -> Duration {
-    let ceiling = (30_u64.saturating_mul(2_u64.saturating_pow(attempt.saturating_sub(1)))).min(900);
-    Duration::from_secs(rand::rng().random_range(ceiling * 4 / 5..=ceiling))
-}
-
-async fn retry_reconciliation<F, Fut>(source_id: &str, mut reconcile: F) -> Result<()>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<()>>,
-{
-    let mut attempt: u32 = 1;
-    loop {
-        let delay = reconciliation_retry_delay(attempt);
-        debug!(
-            source_id,
-            attempt,
-            retry_seconds = delay.as_secs(),
-            "waiting to retry TwitCasting reconciliation"
-        );
-        tokio::time::sleep(delay).await;
-        match reconcile().await {
-            Ok(()) => {
-                info!(source_id, attempt, "TwitCasting reconciliation recovered");
-                return Ok(());
-            }
-            Err(error) if is_transient(&error) => {
-                // One warning per delayed attempt; no process restart or rapid retry.
-                warn!(source_id, attempt, error = %format!("{error:#}"), "TwitCasting reconciliation still unavailable");
-                attempt = attempt.saturating_add(1);
-            }
-            Err(error) => {
-                // The runtime displays only the outer error for background tasks.
-                let message = format!(
-                    "TwitCasting reconciliation retry stopped after a non-transient error: {error:#}"
-                );
-                return Err(error.context(message));
-            }
-        }
     }
 }
 
@@ -603,72 +552,14 @@ mod tests {
     }
 
     #[test]
-    fn only_transient_failures_are_deferred_per_source() {
-        let source = TwitCastingSource::new();
+    fn classifies_structured_api_failures() {
         for status in [408, 429, 500, 502, 503, 504] {
-            source
-                .finish_reconciliation("outage", Err(api_error(status).context("listing hooks")))
-                .unwrap();
-            assert!(source.1.lock().unwrap().contains("outage"));
+            assert!(is_transient(&api_error(status).context("listing hooks")));
         }
         for status in [400, 401, 403, 404] {
-            assert!(
-                source
-                    .finish_reconciliation("invalid", Err(api_error(status)))
-                    .is_err()
-            );
-            assert!(!source.1.lock().unwrap().contains("invalid"));
-            assert!(source.1.lock().unwrap().contains("outage"));
+            assert!(!is_transient(&api_error(status)));
         }
-        assert!(
-            source
-                .finish_reconciliation("config", Err(anyhow::anyhow!("invalid config")))
-                .is_err()
-        );
-        source.finish_reconciliation("outage", Ok(())).unwrap();
-        assert!(source.1.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn retries_back_off_and_stop_after_recovery() {
-        let mut calls = Vec::new();
-        retry_reconciliation("source", || {
-            calls.push(tokio::time::Instant::now());
-            let result = if calls.len() < 3 {
-                Err(api_error(503))
-            } else {
-                Ok(())
-            };
-            std::future::ready(result)
-        })
-        .await
-        .unwrap();
-
-        assert_eq!(calls.len(), 3);
-        assert!((48..=60).contains(&(calls[1] - calls[0]).as_secs()));
-        assert!((96..=120).contains(&(calls[2] - calls[1]).as_secs()));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn retries_stop_on_permanent_failure() {
-        let start = tokio::time::Instant::now();
-        let mut calls = 0;
-        let result = retry_reconciliation("source", || {
-            calls += 1;
-            std::future::ready(Err(api_error(401)))
-        })
-        .await;
-        assert!(result.unwrap_err().to_string().contains("HTTP 401"));
-        assert_eq!(calls, 1);
-        assert!((24..=30).contains(&start.elapsed().as_secs()));
-    }
-
-    #[test]
-    fn retry_delay_stays_bounded_even_after_many_failures() {
-        for attempt in [1, 2, 6, 32, 64, u32::MAX] {
-            let delay = reconciliation_retry_delay(attempt);
-            assert!((24..=900).contains(&delay.as_secs()));
-        }
+        assert!(!is_transient(&anyhow::anyhow!("invalid config")));
     }
 
     #[tokio::test]

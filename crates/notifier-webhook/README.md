@@ -44,6 +44,12 @@ provider-specific logging before returning one of:
 Anyhow errors from `dispatch` are surfaced by the dispatcher as HTTP 400
 rejections.
 
+`ReconciliationRetry` is an optional helper for source wrappers. Use `record_result`
+at startup with a provider-specific transient-error classifier, then call `recover`
+from the source background task. Deferred sources retry independently with exponential
+backoff and jitter (24–30 seconds initially, capped at 12–15 minutes). Permanent errors
+are returned, successful retries stop, and cancellation drops the current timer/request.
+
 ## Example
 
 ```rust
