@@ -11,7 +11,7 @@ use teloxide::{
     prelude::Requester,
     types::{ChatId, Recipient},
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 #[derive(Clone)]
 pub struct TelegramDestination {}
@@ -145,10 +145,6 @@ impl DestinationPlugin for TelegramDestination {
                 max_chars = 4_096,
                 "rejected Telegram delivery because message is too long"
             );
-            warn!(
-                message_chars = message.chars().count(),
-                "rejected Telegram delivery because message is too long"
-            );
             return Err(DeliveryError::permanent(
                 "Telegram message exceeds 4,096 characters",
             ));
@@ -184,11 +180,6 @@ impl DestinationPlugin for TelegramDestination {
                     classified_error = classified.message(),
                     permanent = matches!(classified, DeliveryError::Permanent(_)),
                     "classified Telegram delivery failure"
-                );
-                warn!(
-                    chat_id = %input.chat_id,
-                    error = classified.message(),
-                    "Telegram delivery failed"
                 );
                 classified
             })

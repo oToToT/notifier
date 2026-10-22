@@ -870,6 +870,9 @@ async fn delivery_worker(
                 if permanent || attempts >= max_attempts {
                     warn!(
                         worker_id,
+                        delivery_id = delivery.id,
+                        destination_id = %route.destination_id,
+                        plugin = %destination.plugin,
                         route_id = %delivery.route_id,
                         attempts,
                         error = error.message(),
@@ -894,6 +897,9 @@ async fn delivery_worker(
                     let delay = delivery_retry_delay(attempts, &error);
                     warn!(
                         worker_id,
+                        delivery_id = delivery.id,
+                        destination_id = %route.destination_id,
+                        plugin = %destination.plugin,
                         route_id = %delivery.route_id,
                         attempts,
                         delay,

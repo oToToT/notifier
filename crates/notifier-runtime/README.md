@@ -163,6 +163,10 @@ delay. Workers persist the greater of that delay and the normal exponential back
 provider minimums may exceed the one-hour backoff cap. Waiting occurs in the queue,
 so rate limits do not occupy a delivery worker.
 
+The runtime emits one warning per failed delivery attempt with its retry or dead-letter
+decision, delivery ID, route, and destination. Destination plugins keep provider failure
+details at debug level to avoid duplicate warnings for the same attempt.
+
 `Storage` also exposes source-state helpers backed by `source_baselines` and
 `source_seen_items`. Polling plugins use these to persist first-fetch completion and seen
 event keys across restarts.

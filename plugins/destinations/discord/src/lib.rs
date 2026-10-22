@@ -15,7 +15,7 @@ use serenity::{
     model::id::ChannelId,
     secrets::Token,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 #[derive(Clone)]
 pub struct DiscordDestination {
@@ -136,10 +136,6 @@ impl DestinationPlugin for DiscordDestination {
                 max_chars = 2_000,
                 "rejected Discord delivery because message is too long"
             );
-            warn!(
-                message_chars = message.chars().count(),
-                "rejected Discord delivery because message is too long"
-            );
             return Err(DeliveryError::permanent(
                 "Discord message exceeds 2,000 characters",
             ));
@@ -189,11 +185,6 @@ impl DestinationPlugin for DiscordDestination {
                     classified_error = classified.message(),
                     permanent = matches!(classified, DeliveryError::Permanent(_)),
                     "classified Discord delivery failure"
-                );
-                warn!(
-                    channel_id = %input.channel_id,
-                    error = classified.message(),
-                    "Discord delivery failed"
                 );
                 classified
             })

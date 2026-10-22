@@ -9,6 +9,9 @@ API requests share an HTTP client with a 10-second connection timeout and a
 30-second total request timeout. The runtime also bounds the entire delivery attempt
 (including SDK rate-limit waits) using `delivery.attempt_timeout_seconds`.
 
+Delivery failure warnings come from the runtime together with the retry/dead-letter
+decision. Provider-specific diagnostic details remain available at debug level.
+
 ## What it does
 
 For each delivery, the plugin:

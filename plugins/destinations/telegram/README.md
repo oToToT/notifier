@@ -77,6 +77,9 @@ Telegram `RetryAfter` responses return `DeliveryError::RetryAfter` with the requ
 minimum delay. The runtime stores the retry in SQLite and waits at least that long,
 while retaining exponential backoff if it requires a longer delay.
 
+The runtime emits the delivery failure warning with its retry/dead-letter decision;
+the plugin keeps provider diagnostics at debug level to avoid duplicate warnings.
+
 The plugin returns `DeliveryError::Permanent` for:
 
 - invalid plugin specs or route inputs
