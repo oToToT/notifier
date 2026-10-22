@@ -61,6 +61,7 @@ pub struct RoutePluginInput {
 #[derive(Clone, Debug)]
 pub enum DeliveryError {
     Transient(String),
+    RetryAfter { message: String, delay: Duration },
     Permanent(String),
 }
 
@@ -73,9 +74,19 @@ impl DeliveryError {
         Self::Permanent(message.into())
     }
 
+    /// A transient failure with a provider-specified minimum retry delay.
+    pub fn retry_after(message: impl Into<String>, delay: Duration) -> Self {
+        Self::RetryAfter {
+            message: message.into(),
+            delay,
+        }
+    }
+
     pub fn message(&self) -> &str {
         match self {
-            Self::Transient(message) | Self::Permanent(message) => message,
+            Self::Transient(message)
+            | Self::Permanent(message)
+            | Self::RetryAfter { message, .. } => message,
         }
     }
 }
@@ -871,7 +882,7 @@ async fn delivery_worker(
                         error!(worker_id, %storage_error, "failed to dead-letter delivery");
                     }
                 } else {
-                    let delay = retry_delay(attempts);
+                    let delay = delivery_retry_delay(attempts, &error);
                     warn!(
                         worker_id,
                         route_id = %delivery.route_id,
@@ -906,6 +917,16 @@ fn retry_delay(attempt: u32) -> u64 {
     let base = 2_u64.saturating_pow(attempt.min(11)).min(3_600);
     let jitter = rand::rng().random_range(0..=base / 4);
     (base + jitter).min(3_600)
+}
+
+fn delivery_retry_delay(attempt: u32, error: &DeliveryError) -> u64 {
+    let minimum = match error {
+        DeliveryError::RetryAfter { delay, .. } => delay
+            .as_secs()
+            .saturating_add(u64::from(delay.subsec_nanos() > 0)),
+        _ => 0,
+    };
+    retry_delay(attempt).max(minimum)
 }
 
 pub fn schema_value<T: JsonSchema>() -> Value {
@@ -1049,6 +1070,16 @@ mod tests {
         for attempt in 0..32 {
             assert!(retry_delay(attempt) <= 3_600);
         }
+    }
+
+    #[test]
+    fn delivery_retries_honor_provider_minimum_without_disabling_backoff() {
+        let error = DeliveryError::retry_after("rate limited", Duration::from_secs(7200));
+        assert_eq!(delivery_retry_delay(1, &error), 7200);
+        let fractional = DeliveryError::retry_after("rate limited", Duration::from_millis(120_001));
+        assert_eq!(delivery_retry_delay(1, &fractional), 121);
+        let short = DeliveryError::retry_after("rate limited", Duration::from_secs(1));
+        assert!(delivery_retry_delay(5, &short) >= 32);
     }
 
     #[test]

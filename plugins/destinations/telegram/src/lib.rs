@@ -198,14 +198,31 @@ impl DestinationPlugin for TelegramDestination {
 fn classify_error(error: RequestError) -> DeliveryError {
     match error {
         RequestError::Network(error) => DeliveryError::transient(error.to_string()),
-        RequestError::RetryAfter(duration) => {
-            DeliveryError::transient(format!("Telegram requested retry after {duration:?}"))
+        RequestError::RetryAfter(duration) => DeliveryError::retry_after(
+            format!("Telegram requested retry after {duration:?}"),
+            duration.duration(),
+        ),
+        RequestError::InvalidJson { .. } => {
+            DeliveryError::transient("Telegram returned an invalid JSON response")
         }
-        RequestError::Api(ApiError::Unknown(error)) if error.contains("Internal Server Error") => {
+        RequestError::Api(ApiError::Unknown(error)) if is_temporary_api_error(&error) => {
             DeliveryError::transient(error)
         }
         error => DeliveryError::permanent(error.to_string()),
     }
+}
+
+fn is_temporary_api_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "internal server error",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        "too many requests",
+    ]
+    .iter()
+    .any(|failure| message.contains(failure))
 }
 
 #[cfg(test)]
@@ -215,10 +232,38 @@ mod tests {
     use teloxide::types::Seconds;
 
     #[test]
-    fn classifies_retry_after_as_transient() {
+    fn preserves_retry_after_delay() {
+        match classify_error(RequestError::RetryAfter(Seconds::from_seconds(120))) {
+            DeliveryError::RetryAfter { delay, .. } => assert_eq!(delay.as_secs(), 120),
+            error => panic!("unexpected classification: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn retries_maintenance_responses_but_preserves_permanent_errors() {
+        let source = serde_json::from_str::<Value>("<html>maintenance</html>").unwrap_err();
+        let error = RequestError::InvalidJson {
+            source: std::sync::Arc::new(source),
+            raw: "<html>maintenance</html>".into(),
+        };
+        assert!(matches!(classify_error(error), DeliveryError::Transient(_)));
+        for message in [
+            "Internal Server Error",
+            "Bad Gateway",
+            "Service Unavailable",
+            "Gateway Timeout",
+            "Too Many Requests",
+        ] {
+            assert!(matches!(
+                classify_error(RequestError::Api(ApiError::Unknown(message.into()))),
+                DeliveryError::Transient(_)
+            ));
+        }
         assert!(matches!(
-            classify_error(RequestError::RetryAfter(Seconds::from_seconds(1))),
-            DeliveryError::Transient(_)
+            classify_error(RequestError::Api(ApiError::Unknown(
+                "Bad Request: chat not found".into()
+            ))),
+            DeliveryError::Permanent(_)
         ));
     }
 

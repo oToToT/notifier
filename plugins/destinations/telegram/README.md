@@ -69,8 +69,13 @@ use 5-32 ASCII letters, digits, or underscores after it.
 The plugin returns `DeliveryError::Transient` for:
 
 - network failures
-- Telegram `RetryAfter`
 - Telegram API errors containing `Internal Server Error`
+- temporary gateway/service errors and malformed JSON responses, including HTML
+  maintenance pages
+
+Telegram `RetryAfter` responses return `DeliveryError::RetryAfter` with the requested
+minimum delay. The runtime stores the retry in SQLite and waits at least that long,
+while retaining exponential backoff if it requires a longer delay.
 
 The plugin returns `DeliveryError::Permanent` for:
 

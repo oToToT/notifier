@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -166,7 +166,12 @@ impl Storage {
              WHERE id = ?",
                 params![
                     attempts,
-                    unix_seconds().saturating_add(delay_seconds as i64),
+                    retry_available_at(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default(),
+                        delay_seconds
+                    ),
                     error,
                     id
                 ],
@@ -305,9 +310,27 @@ fn unix_seconds() -> i64 {
         .as_secs() as i64
 }
 
+fn retry_available_at(now: Duration, delay_seconds: u64) -> i64 {
+    // SQLite uses whole seconds. Round up so a provider minimum is never shortened.
+    now.as_secs()
+        .saturating_add(u64::from(now.subsec_nanos() > 0))
+        .saturating_add(delay_seconds)
+        .min(i64::MAX as u64) as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_timestamps_round_up_and_do_not_overflow() {
+        assert_eq!(retry_available_at(Duration::from_millis(100_001), 120), 221);
+        assert_eq!(retry_available_at(Duration::from_secs(100), 120), 220);
+        assert_eq!(
+            retry_available_at(Duration::from_secs(100), u64::MAX),
+            i64::MAX
+        );
+    }
 
     #[test]
     fn deduplicates_and_recovers_deliveries() {

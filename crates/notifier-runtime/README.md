@@ -99,7 +99,7 @@ pub trait DestinationPlugin: Send + Sync {
 
 `PluginMetadata` includes both `spec_schema` for the reusable destination instance and
 `input_schema` for each route's destination input. Destination implementations classify
-failures as `DeliveryError::Transient` or `DeliveryError::Permanent`. Transient failures are
+failures as `DeliveryError::Transient`, `DeliveryError::RetryAfter`, or `DeliveryError::Permanent`. Transient failures are
 retried until `delivery.max_attempts` is reached. Permanent failures are moved directly to
 dead-letter state.
 
@@ -155,6 +155,11 @@ dead-letter state.
 Delivery workers claim queued rows, call the destination plugin, complete successful rows,
 retry transient failures with exponential backoff and jitter capped at one hour, and retain
 permanent failures as dead-letter rows.
+
+`DeliveryError::retry_after(message, duration)` supplies a provider-requested minimum
+delay. Workers persist the greater of that delay and the normal exponential backoff;
+provider minimums may exceed the one-hour backoff cap. Waiting occurs in the queue,
+so rate limits do not occupy a delivery worker.
 
 `Storage` also exposes source-state helpers backed by `source_baselines` and
 `source_seen_items`. Polling plugins use these to persist first-fetch completion and seen
