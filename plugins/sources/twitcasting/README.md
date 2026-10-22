@@ -32,6 +32,30 @@ Notifier registers the event hook but does not set that callback URL.
 Existing TwitCasting hooks that are not represented in the Notifier configuration are not
 deleted.
 
+## API outages and recovery
+
+Temporary reconciliation failures do not stop the server. HTTP 5xx, 408, and 429 responses,
+network failures, timeouts, and malformed API responses defer registration to a background
+task. This includes maintenance proxies returning HTML instead of JSON; the SDK does not
+preserve the HTTP status for those responses. Other sources, delivery workers, and the
+TwitCasting webhook endpoint remain available. Existing subscriptions can still deliver
+events if TwitCasting sends them during the outage.
+
+Retries use exponential backoff with jitter: initially 24–30 seconds, then 48–60 seconds,
+doubling up to 12–15 minutes. Each failed attempt emits one warning, and recovery emits an
+info message. Every retry lists existing hooks again before creating missing subscriptions,
+so a registration whose response was lost can be discovered on the next attempt. Retries
+stop after successful reconciliation. Requests have a 10-second connection timeout and a
+30-second total timeout, and reuse one HTTP client within each reconciliation pass.
+
+Configuration errors and structured HTTP 4xx errors other than 408/429 still fail startup.
+If a permanent error occurs during background recovery, that task stops and logs an error;
+fix the configuration or credentials and restart the server.
+
+`/ready` indicates that the server is serving requests; it does not guarantee that deferred
+TwitCasting registrations have completed. New subscriptions may miss events until recovery.
+The plugin cannot replay events TwitCasting did not deliver.
+
 ## Configuration
 
 Use this plugin in the `srcs` map, then provide route-local broadcaster inputs from routes:
