@@ -24,6 +24,10 @@ At webhook time, the plugin:
 - Fetches current stream data for the notification.
 - Enqueues one rendered delivery per matching route through `notifier-runtime`.
 
+Malformed requests return HTTP 400 and invalid signatures return HTTP 401. API or
+queueing failures return HTTP 503; an event is only acknowledged after durable
+queueing succeeds (or the event is intentionally ignored).
+
 Existing Twitch subscriptions that are not represented in the Notifier configuration are not
 deleted.
 

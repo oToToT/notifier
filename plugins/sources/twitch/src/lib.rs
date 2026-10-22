@@ -360,7 +360,7 @@ impl WebhookProvider for TwitchProvider {
         match event {
             ParsedMessage::Challenge { challenge } => {
                 let challenge = challenge
-                    .context("challenge is missing")
+                    .ok_or_else(|| WebhookError::bad_request("challenge is missing"))
                     .inspect_err(|error| {
                         debug!(
                             source_id = %context.source_id,
@@ -402,15 +402,17 @@ impl WebhookProvider for TwitchProvider {
                     );
                     return Ok(WebhookOutcome::Ignored);
                 }
-                let event = event.context("event is missing").inspect_err(|error| {
-                    debug!(
-                        source_id = %context.source_id,
-                        message_id,
-                        subscription_type = %kind,
-                        error = %error,
-                        "rejected Twitch notification because event is missing"
-                    );
-                })?;
+                let event = event
+                    .ok_or_else(|| WebhookError::bad_request("event is missing"))
+                    .inspect_err(|error| {
+                        debug!(
+                            source_id = %context.source_id,
+                            message_id,
+                            subscription_type = %kind,
+                            error = %error,
+                            "rejected Twitch notification because event is missing"
+                        );
+                    })?;
                 let route_ids = matching_route_ids(
                     &context.route_inputs,
                     &event.broadcaster_user_login,
@@ -519,7 +521,10 @@ impl WebhookProvider for TwitchProvider {
                     message_type,
                     "rejected Twitch webhook with unsupported message type"
                 );
-                bail!("unsupported Twitch message type {message_type:?}");
+                Err(WebhookError::bad_request(format!(
+                    "unsupported Twitch message type {message_type:?}"
+                ))
+                .into())
             }
         }
     }

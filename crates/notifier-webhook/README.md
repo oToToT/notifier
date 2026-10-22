@@ -41,8 +41,10 @@ provider-specific logging before returning one of:
 - `WebhookOutcome::Accepted` — HTTP 204.
 - `WebhookOutcome::Ignored` — HTTP 204.
 
-Anyhow errors from `dispatch` are surfaced by the dispatcher as HTTP 400
-rejections.
+Dispatch errors containing `WebhookError::Unauthorized` or `WebhookError::BadRequest`
+return HTTP 401 or 400, respectively, including when wrapped in anyhow context. Other
+dispatch errors (such as API outages or failed SQLite ingestion) return HTTP 503 with
+`Retry-After: 30`. Internal error details are logged and omitted from the response.
 
 `ReconciliationRetry` is an optional helper for source wrappers. Use `record_result`
 at startup with a provider-specific transient-error classifier, then call `recover`

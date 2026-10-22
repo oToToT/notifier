@@ -22,8 +22,8 @@ use crate::input::{BroadcasterValidator, configured_broadcasters};
 
 /// Error returned by [`WebhookProvider::parse`]. The dispatcher maps
 /// [`WebhookError::Unauthorized`] to HTTP 401 and [`WebhookError::BadRequest`]
-/// to HTTP 400; other failures from the provider flow through the dispatcher's
-/// generic error handler as 400 responses.
+/// to HTTP 400. Providers can also return this error from `dispatch` to identify
+/// invalid requests. Other dispatch failures return HTTP 503.
 #[derive(Debug)]
 pub enum WebhookError {
     /// The webhook signature was missing or did not verify.
@@ -85,7 +85,7 @@ pub enum WebhookOutcome {
 /// `parse` runs first on each inbound HTTP request and is expected to perform
 /// signature/shape verification. `dispatch` then carries out provider-specific
 /// matching, enrichment, ingestion, and logging. Splitting these phases lets
-/// the unified dispatcher normalize the 401/400/204/200 status responses
+/// the unified dispatcher normalize the 401/400/503/204/200 status responses
 /// across providers.
 #[async_trait]
 pub trait WebhookProvider: Send + Sync + 'static {
@@ -125,8 +125,8 @@ pub trait WebhookProvider: Send + Sync + 'static {
 
     /// Resolve the decoded event into an outcome. Providers are expected to
     /// perform broadcaster matching, enrichment, ingestion, and any
-    /// provider-specific logging here. Errors bubble up to the dispatcher as
-    /// HTTP 400 responses.
+    /// provider-specific logging here. Return [`WebhookError`] for invalid requests.
+    /// Other errors return HTTP 503 so processing failures can be retried.
     async fn dispatch(
         &self,
         spec: &Self::Spec,
@@ -265,13 +265,66 @@ async fn webhook<P: WebhookProvider>(
         Ok(WebhookOutcome::Accepted) => StatusCode::NO_CONTENT.into_response(),
         Ok(WebhookOutcome::Ignored) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => {
+            let response = dispatch_error_response(&error);
             warn!(
                 source_id = %source_id,
                 body_bytes = body.len(),
-                error = %error,
-                "rejected webhook"
+                status = %response.status(),
+                error = %format!("{error:#}"),
+                "webhook processing failed"
             );
-            (StatusCode::BAD_REQUEST, error.to_string()).into_response()
+            response
+        }
+    }
+}
+
+fn dispatch_error_response(error: &anyhow::Error) -> Response {
+    match error.downcast_ref::<WebhookError>() {
+        Some(WebhookError::Unauthorized) => StatusCode::UNAUTHORIZED.into_response(),
+        Some(WebhookError::BadRequest(message)) => {
+            (StatusCode::BAD_REQUEST, message.clone()).into_response()
+        }
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("retry-after", "30")],
+            "webhook processing temporarily unavailable",
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_preserves_explicit_request_errors_through_context() {
+        for (error, status) in [
+            (WebhookError::Unauthorized, StatusCode::UNAUTHORIZED),
+            (
+                WebhookError::bad_request("event is missing"),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let error = anyhow::Error::new(error).context("dispatch failed");
+            assert_eq!(dispatch_error_response(&error).status(), status);
+        }
+    }
+
+    #[tokio::test]
+    async fn processing_failures_are_retryable_and_do_not_expose_details() {
+        for message in [
+            "upstream API returned 503",
+            "database is locked",
+            "private configuration details",
+        ] {
+            let response = dispatch_error_response(&anyhow::anyhow!(message));
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()["retry-after"], "30");
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert_eq!(&body[..], b"webhook processing temporarily unavailable");
         }
     }
 }
