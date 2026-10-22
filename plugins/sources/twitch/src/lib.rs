@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use axum::{Router, body::Bytes, http::HeaderMap};
@@ -6,9 +8,9 @@ use notifier_runtime::{
     PluginMetadata, RoutePluginInput, SourceContext, SourcePlugin, ValidatedSource, schema_value,
 };
 use notifier_webhook::{
-    BroadcasterValidator, CommonSpec, WebhookError, WebhookOutcome, WebhookProvider, WebhookSource,
-    configured_broadcasters, expected_hmac_sha256_parts, matching_route_ids, validate_common_spec,
-    verify_hmac_sha256_parts,
+    BroadcasterValidator, CommonSpec, ReconciliationRetry, WebhookError, WebhookOutcome,
+    WebhookProvider, WebhookSource, configured_broadcasters, expected_hmac_sha256_parts,
+    matching_route_ids, validate_common_spec, verify_hmac_sha256_parts,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -21,11 +23,14 @@ use twitch_api::{
     twitch_oauth2::{AppAccessToken, ClientId, ClientSecret},
 };
 
-pub struct TwitchSource(pub WebhookSource<TwitchProvider>);
+pub struct TwitchSource(pub WebhookSource<TwitchProvider>, ReconciliationRetry);
 
 impl TwitchSource {
     pub fn new() -> Self {
-        Self(WebhookSource::new(TwitchProvider::default()))
+        Self(
+            WebhookSource::new(TwitchProvider::default()),
+            ReconciliationRetry::default(),
+        )
     }
 }
 
@@ -53,16 +58,94 @@ impl SourcePlugin for TwitchSource {
         self.0.router(context)
     }
     async fn reconcile(&self, context: &SourceContext) -> Result<()> {
-        self.0.reconcile(context).await
+        self.1.record_result(
+            &context.source_id,
+            "twitch",
+            self.0.reconcile(context).await,
+            is_transient,
+        )
     }
     async fn run(&self, context: SourceContext) -> Result<()> {
-        self.0.run(context).await
+        self.1
+            .recover(
+                &context.source_id,
+                "twitch",
+                || self.0.reconcile(&context),
+                is_transient,
+            )
+            .await
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct TwitchProvider {
     client: TwitchClient<'static, reqwest::Client>,
+}
+
+impl Default for TwitchProvider {
+    fn default() -> Self {
+        let http = reqwest::Client::builder()
+            .user_agent("notifier-source-twitch")
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("failed to build Twitch HTTP client");
+        Self {
+            client: TwitchClient::with_client(http),
+        }
+    }
+}
+
+fn is_transient_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error() || matches!(status.as_u16(), 408 | 429)
+}
+
+fn is_transient(error: &anyhow::Error) -> bool {
+    use twitch_api::{
+        helix::{ClientRequestError, HelixRequestGetError, HelixRequestPostError},
+        twitch_oauth2::RequestParseError,
+    };
+
+    error.chain().any(|error| {
+        if let Some(error) = error.downcast_ref::<reqwest::Error>() {
+            return error.is_timeout()
+                || error.is_connect()
+                || error.is_request()
+                || error.is_body();
+        }
+        if let Some(error) = error.downcast_ref::<RequestParseError>() {
+            return match error {
+                RequestParseError::Other(status) => is_transient_status(*status),
+                RequestParseError::TwitchError(error) => is_transient_status(error.status),
+                RequestParseError::NotJson { .. } | RequestParseError::DeserializeError(_) => true,
+                _ => false,
+            };
+        }
+        // SDK transparent errors do not always expose their wrapper in source().
+        match error.downcast_ref::<ClientRequestError<reqwest::Error>>() {
+            Some(ClientRequestError::HelixRequestGetError(error)) => match error {
+                HelixRequestGetError::Error { status, .. } => is_transient_status(*status),
+                HelixRequestGetError::DeserializeError(_, _, _, status)
+                | HelixRequestGetError::InvalidResponse { status, .. } => {
+                    status.is_success() || is_transient_status(*status)
+                }
+                HelixRequestGetError::Utf8Error(..) => true,
+                _ => false,
+            },
+            Some(ClientRequestError::HelixRequestPostError(error)) => match error {
+                HelixRequestPostError::Error { status, .. } => is_transient_status(*status),
+                HelixRequestPostError::DeserializeError(_, _, _, status)
+                | HelixRequestPostError::InvalidResponse { status, .. } => {
+                    status.is_success() || is_transient_status(*status)
+                }
+                HelixRequestPostError::Utf8Error(..) => true,
+                _ => false,
+            },
+            Some(ClientRequestError::HyperError(_)) => true,
+            _ => false,
+        }
+    })
 }
 
 impl TwitchProvider {
@@ -608,6 +691,44 @@ async fn get_stream(
 mod tests {
     use super::*;
     use notifier_webhook::expected_hmac_sha256_parts;
+
+    #[test]
+    fn classifies_sdk_errors_through_context_and_transparent_wrappers() {
+        use twitch_api::{
+            helix::{ClientRequestError, HelixRequestGetError, HelixRequestPostError},
+            twitch_oauth2::{RequestParseError, tokens::errors::AppAccessTokenError},
+        };
+        for status in [400, 401, 403, 404, 408, 429, 500, 503] {
+            let status = reqwest::StatusCode::from_u16(status).unwrap();
+            let expected = is_transient_status(status);
+            let get: anyhow::Error = ClientRequestError::<reqwest::Error>::HelixRequestGetError(
+                HelixRequestGetError::Error {
+                    status,
+                    error: "API error".into(),
+                    message: "failure".into(),
+                    uri: "/users".parse().unwrap(),
+                },
+            )
+            .into();
+            assert_eq!(is_transient(&get.context("resolve broadcaster")), expected);
+            let post: anyhow::Error = ClientRequestError::<reqwest::Error>::HelixRequestPostError(
+                HelixRequestPostError::InvalidResponse {
+                    status,
+                    reason: "not JSON",
+                    response: "<html>maintenance</html>".into(),
+                    uri: "/eventsub/subscriptions".parse().unwrap(),
+                },
+            )
+            .into();
+            assert_eq!(is_transient(&post.context("register webhook")), expected);
+            let token: anyhow::Error = AppAccessTokenError::<reqwest::Error>::RequestParseError(
+                RequestParseError::Other(status),
+            )
+            .into();
+            assert_eq!(is_transient(&token.context("request token")), expected);
+        }
+        assert!(!is_transient(&anyhow::anyhow!("broadcaster not found")));
+    }
 
     fn spec_value() -> Value {
         serde_json::json!({

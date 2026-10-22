@@ -27,6 +27,19 @@ At webhook time, the plugin:
 Existing Twitch subscriptions that are not represented in the Notifier configuration are not
 deleted.
 
+Temporary startup API failures (HTTP 5xx, 408, 429, network failures, or malformed
+responses) defer reconciliation to the source background task. The server continues
+serving existing webhooks and running other sources and delivery workers. Retries list
+current subscriptions before creating missing ones and use exponential backoff with
+jitter, initially 24–30 seconds and capped at 12–15 minutes. Recovery stops the retry
+task; permanent errors stop recovery and are logged. Configuration errors and permanent
+API errors during startup still fail startup.
+
+Twitch API calls, including webhook enrichment, have a 10-second connection timeout
+and a 30-second total request timeout. `/ready` indicates server availability, rather
+than confirmation that deferred subscriptions have been registered. Events can be
+missed until missing subscriptions are registered.
+
 ## Configuration
 
 Use this plugin in the `srcs` map, then provide route-local broadcaster inputs from routes:
