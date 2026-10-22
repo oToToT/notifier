@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio::time::Instant;
 use tracing::{debug, info, warn};
 use url::Url;
 
@@ -295,7 +296,10 @@ impl SourcePlugin for NitterSource {
                 "Nitter background task rejected route input configuration"
             );
         })?;
-        let mut retry_seconds = spec.retry_initial_seconds;
+        let mut polls: Vec<_> = users.iter().map(|_| UserPoll::new(&spec)).collect();
+        let mut next_warning = Instant::now();
+        let mut failed_since_warning = 0usize;
+        let mut last_error = String::new();
         info!(
             source_id = %context.source_id,
             user_count = users.len(),
@@ -304,55 +308,55 @@ impl SourcePlugin for NitterSource {
         );
 
         loop {
+            let cycle_started = Instant::now();
             let mut successes = 0usize;
-            for user in &users {
+            let mut recovered = 0usize;
+            for (user, poll) in users.iter().zip(&mut polls) {
+                if poll.next_poll > cycle_started {
+                    continue;
+                }
                 debug!(source_id = %context.source_id, user, "polling Nitter user");
                 match poll_user(&self.client, &context, &spec, user).await {
                     Ok(()) => {
                         successes += 1;
+                        recovered += usize::from(poll.failures > 0);
+                        poll.succeeded(Instant::now(), &spec);
                     }
                     Err(error) => {
-                        debug!(
-                            source_id = %context.source_id,
-                            user,
-                            error = %error,
-                            retry_seconds,
-                            "Nitter user poll failed"
-                        );
-                        warn!(
-                            source_id = %context.source_id,
-                            user,
-                            %error,
-                            retry_seconds,
-                            "Nitter fetch failed"
-                        );
+                        let delay = poll.failed(Instant::now(), &spec);
+                        failed_since_warning = failed_since_warning.saturating_add(1);
+                        last_error = format!("{error:#}").chars().take(512).collect();
+                        debug!(source_id = %context.source_id, user,
+                            error = %format!("{error:#}"), delay, failures = poll.failures,
+                            "Nitter user poll failed; backing off");
                     }
                 }
             }
 
-            let delay = if successes == 0 {
-                let delay = jittered_delay(retry_seconds, spec.retry_max_seconds);
-                retry_seconds = retry_seconds.saturating_mul(2).min(spec.retry_max_seconds);
-                warn!(
-                    source_id = %context.source_id,
-                    user_count = users.len(),
-                    delay,
-                    retry_seconds,
-                    "all Nitter fetches failed; backing off"
-                );
-                delay
-            } else {
-                retry_seconds = spec.retry_initial_seconds;
-                spec.poll_interval_seconds
-            };
-            debug!(
-                source_id = %context.source_id,
-                successes,
-                user_count = users.len(),
-                delay,
-                "Nitter polling cycle completed"
-            );
-            tokio::time::sleep(Duration::from_secs(delay)).await;
+            let failed_users = polls.iter().filter(|poll| poll.failures > 0).count();
+            let now = Instant::now();
+            if failed_users == 0 {
+                failed_since_warning = 0;
+            } else if failed_since_warning > 0 && now >= next_warning {
+                warn!(source_id = %context.source_id, failed_users,
+                    failed_attempts = failed_since_warning, error = %last_error,
+                    "Nitter polling failures; affected users are backing off");
+                failed_since_warning = 0;
+                next_warning = now + Duration::from_secs(60);
+            }
+            if recovered > 0 {
+                info!(source_id = %context.source_id, recovered_users = recovered,
+                    remaining_failed_users = failed_users, "Nitter feeds recovered");
+            }
+            let next_poll = polls
+                .iter()
+                .map(|poll| poll.next_poll)
+                .min()
+                .expect("validated Nitter source has users");
+            debug!(source_id = %context.source_id, successes, failed_users,
+                delay_seconds = next_poll.saturating_duration_since(now).as_secs(),
+                "Nitter polling cycle completed");
+            tokio::time::sleep_until(next_poll).await;
         }
     }
 }
@@ -729,6 +733,41 @@ fn jittered_delay(base_seconds: u64, max_seconds: u64) -> u64 {
     capped.saturating_add(jitter).min(max_seconds)
 }
 
+/// Each feed keeps its own cadence so partial outages do not reset backoff or
+/// force successful feeds to be fetched at the retry interval.
+struct UserPoll {
+    next_poll: Instant,
+    retry_seconds: u64,
+    failures: u32,
+}
+
+impl UserPoll {
+    fn new(spec: &Spec) -> Self {
+        Self {
+            next_poll: Instant::now(),
+            retry_seconds: spec.retry_initial_seconds,
+            failures: 0,
+        }
+    }
+
+    fn succeeded(&mut self, now: Instant, spec: &Spec) {
+        self.failures = 0;
+        self.retry_seconds = spec.retry_initial_seconds;
+        self.next_poll = now + Duration::from_secs(spec.poll_interval_seconds);
+    }
+
+    fn failed(&mut self, now: Instant, spec: &Spec) -> u64 {
+        let delay = jittered_delay(self.retry_seconds, spec.retry_max_seconds);
+        self.failures = self.failures.saturating_add(1);
+        self.retry_seconds = self
+            .retry_seconds
+            .saturating_mul(2)
+            .min(spec.retry_max_seconds);
+        self.next_poll = now + Duration::from_secs(delay);
+        delay
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,6 +785,28 @@ mod tests {
             "instance_url": "https://nitter.example",
             "tweet_url_base": "https://fxtwitter.com"
         })
+    }
+
+    #[test]
+    fn partial_outages_back_off_independently_and_recovery_resets_cadence() {
+        let spec = parse_spec(&spec_json()).unwrap();
+        let now = Instant::now();
+        let mut healthy = UserPoll::new(&spec);
+        let mut failing = UserPoll::new(&spec);
+        healthy.succeeded(now, &spec);
+        assert!((30..=37).contains(&failing.failed(now, &spec)));
+        assert!((60..=75).contains(&failing.failed(now, &spec)));
+        assert_eq!(healthy.next_poll, now + Duration::from_secs(300));
+        assert_eq!(healthy.retry_seconds, 30);
+        assert_eq!(failing.retry_seconds, 120);
+        assert_eq!(failing.failures, 2);
+        for _ in 0..64 {
+            assert!(failing.failed(now, &spec) <= spec.retry_max_seconds);
+        }
+        failing.succeeded(now, &spec);
+        assert_eq!(failing.retry_seconds, 30);
+        assert_eq!(failing.failures, 0);
+        assert_eq!(failing.next_poll, healthy.next_poll);
     }
 
     #[test]

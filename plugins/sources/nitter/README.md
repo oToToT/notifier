@@ -38,3 +38,12 @@ The default `first_fetch` mode is `mark_seen`, which records the current RSS ite
 sending notifications. `notify_existing` sends the current feed contents on the first
 successful fetch, then records them as seen. RSS `guid` values are used as item keys, falling
 back to item links.
+
+Each configured user has an independent polling and retry schedule. Failed fetches
+use exponential backoff with jitter up to `retry_max_seconds`, including when other
+users succeed. A successful fetch resets that user's retry delay and resumes the
+normal polling interval. Requests use `request_timeout_seconds` (default `20`).
+
+Failures produce one summary warning at most once per minute per source, with a
+bounded sample error. Per-user failure details are available at debug level, and
+recovery is logged at info level.
